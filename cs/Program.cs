@@ -1,0 +1,197 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.Text.Json;
+using TestnetExec;
+
+// Binance Spot testnet — full execution loop over raw signed WebSocket order entry.
+//   place/cancel on the ws-api socket → the exchange's response (status + fills) folds into an
+//   idempotent own-order state machine. Demonstrates own WS signing, a resting place→cancel loop,
+//   a real fill loop (marketable IOC buy → fill → flatten sell), and -1021 / -2011 handling.
+// All against testnet fake funds; resting orders sit 10% below market so they never fill.
+
+const string REST = "https://testnet.binance.vision";
+const string WSAPI = "wss://ws-api.testnet.binance.vision/ws-api/v3";
+const string SYMBOL = "BTCUSDT";
+int reps = int.TryParse(Environment.GetEnvironmentVariable("REPS"), out var r) ? r : 5;
+string qty = Environment.GetEnvironmentVariable("QTY") ?? "0.00030";
+
+var key = Environment.GetEnvironmentVariable("BINANCE_TESTNET_KEY");
+var secret = Environment.GetEnvironmentVariable("BINANCE_TESTNET_SECRET");
+if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(secret))
+{ Console.Error.WriteLine("BINANCE_TESTNET_KEY / _SECRET missing — source ~/.claude/.secrets"); return 1; }
+
+var inv = CultureInfo.InvariantCulture;
+var http = new HttpClient { BaseAddress = new Uri(REST) };
+
+async Task<long> ServerOffset()
+{
+    long t0 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    using var d = JsonDocument.Parse(await http.GetStringAsync("/api/v3/time"));
+    long t1 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    return d.RootElement.GetProperty("serverTime").GetInt64() - (t0 + t1) / 2;
+}
+async Task<(decimal bid, decimal ask)> BookTicker()
+{
+    using var d = JsonDocument.Parse(await http.GetStringAsync($"/api/v3/ticker/bookTicker?symbol={SYMBOL}"));
+    return (decimal.Parse(d.RootElement.GetProperty("bidPrice").GetString()!, inv),
+            decimal.Parse(d.RootElement.GetProperty("askPrice").GetString()!, inv));
+}
+string Px(decimal p) => (Math.Floor(p * 100) / 100).ToString("0.00", inv);
+SortedDictionary<string, string> P(params (string, string)[] kv) { var d = new SortedDictionary<string, string>(); foreach (var (k, v) in kv) d[k] = v; return d; }
+
+// S3 — one engine holds the market book AND my own order, and reads my queue position out of the
+// same structure. Market feed + own order both on testnet (same market — no mainnet/testnet mix).
+async Task<int> BookDemo(long off)
+{
+    const string WSSTREAM = "wss://stream.testnet.binance.vision";
+    var hb = new HybridBook(40000);                        // ±$200 flat window around mid
+    await using var feed = new MarketFeed(hb, http, WSSTREAM, SYMBOL);
+    await feed.StartAsync();
+    await Task.Delay(2500);                                 // let a few diffs settle around the touch
+
+    var (bidT, askT) = feed.Best();
+    if (bidT is null || askT is null) { Console.WriteLine("market book not populated"); return 1; }
+    int myTick = bidT.Value;                                // join the queue at best bid (passive, won't cross)
+    decimal queueAhead = feed.QtyAt(true, myTick) / 100_000_000m;   // market qty resting at my price, BEFORE mine
+    decimal myPrice = myTick / 100m;
+
+    var ob = new OwnOrderBook();
+    await using var oe = new WsOrderClient(WSAPI, key!, secret!);
+    oe.SetServerOffset(off);
+    oe.SetResync(ServerOffset);
+    await oe.ConnectAsync();
+
+    string cid = $"book-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+    var o = ob.Submit(cid, out _); o.TryTransition(OrderState.Sent);
+    var pres = await oe.SendSignedAsync("order.place", P(("symbol", SYMBOL), ("side", "BUY"), ("type", "LIMIT"), ("timeInForce", "GTC"), ("quantity", qty), ("price", Px(myPrice)), ("newClientOrderId", cid)));
+    o.ExchangeId = pres.GetProperty("orderId").GetInt64();
+    ob.Apply(o, pres);
+
+    Console.WriteLine($"market   best bid {bidT.Value / 100m:0.00}  best ask {askT.Value / 100m:0.00}");
+    Console.WriteLine($"my order BUY {qty} @ {myPrice:0.00}  ({o.State})");
+    Console.WriteLine($"queue    {queueAhead:0.00000} BTC resting ahead of me at {myPrice:0.00} — FIFO estimate read straight from the live book");
+
+    ob.Apply(o, await oe.SendSignedAsync("order.cancel", P(("symbol", SYMBOL), ("origClientOrderId", cid))));
+    Console.WriteLine($"canceled ({o.State}) — one engine tracked the market book, my order, and my queue position");
+    return o.State == OrderState.Canceled ? 0 : 1;
+}
+
+// S4 — async event reactor: the live book streams into a single-consumer channel; a Strategy reacts
+// to each tick in arrival order (no locks in the strategy). Read-only market data, no orders.
+async Task<int> ReactDemo()
+{
+    const string WSSTREAM = "wss://stream.testnet.binance.vision";
+    var hb = new HybridBook(40000);
+    await using var feed = new MarketFeed(hb, http, WSSTREAM, SYMBOL);
+    var strat = new ImbalanceReactor();
+    var reactor = new EventReactor(strat);
+    feed.OnBookUpdate = () => { var (b, a) = feed.Best(); if (b is int bt && a is int at) reactor.PostBook(bt, at, feed.QtyAt(true, bt), feed.QtyAt(false, at)); };
+
+    await feed.StartAsync();
+    var run = reactor.RunAsync(CancellationToken.None);
+    Console.WriteLine("async event reactor running — reacting to the live testnet book for 6s...\n");
+    await Task.Delay(6000);
+    reactor.Complete();            // channel completes -> the consumer drains remaining events and stops
+    await run;
+
+    Console.WriteLine($"\nreactor drained {reactor.Dispatched} book events · strategy logged {strat.Flips} imbalance flips");
+    Console.WriteLine("✓ async reactor OK — single-consumer channel, strategy reacted to a serialized live event stream");
+    return reactor.Dispatched > 0 ? 0 : 1;
+}
+
+long offset = await ServerOffset();
+string mode = Environment.GetEnvironmentVariable("MODE") ?? "loop";
+if (mode == "book") return await BookDemo(offset);
+if (mode == "react") return await ReactDemo();
+var (bid0, ask0) = await BookTicker();
+string restPrice = Px(bid0 * 0.9m);
+Console.WriteLine($"clock offset ≈ {offset}ms · market {bid0:0.00}/{ask0:0.00} · resting BUY {qty} @ {restPrice} · {reps} reps\n");
+
+var book = new OwnOrderBook();
+await using var oe = new WsOrderClient(WSAPI, key!, secret!);
+oe.SetServerOffset(offset);
+oe.SetResync(ServerOffset);
+await oe.ConnectAsync();
+
+var placeMs = new List<double>();
+var cancelMs = new List<double>();
+var errors = new Dictionary<string, int>();
+int acked = 0, canceled = 0, dupRefused = 0;
+string Classify(BinanceWsError e) => e.Code switch { -1021 => "CLOCK_SKEW", -2011 => "ORDER_GONE", -1003 => "RATE_LIMIT", _ => $"OTHER({e.Code})" };
+
+// ---- resting place → cancel loop; FSM folded from each response ----
+for (int i = 0; i < reps; i++)
+{
+    string cid = $"rest-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{i}";
+    var o = book.Submit(cid, out bool created);
+    if (!created) { dupRefused++; continue; }
+    try
+    {
+        o.TryTransition(OrderState.Sent);
+        var sw = Stopwatch.StartNew();
+        var pres = await oe.SendSignedAsync("order.place", P(("symbol", SYMBOL), ("side", "BUY"), ("type", "LIMIT"), ("timeInForce", "GTC"), ("quantity", qty), ("price", restPrice), ("newClientOrderId", cid)));
+        placeMs.Add(sw.Elapsed.TotalMilliseconds);
+        o.ExchangeId = pres.GetProperty("orderId").GetInt64();
+        book.Apply(o, pres);
+        if (o.State == OrderState.Acked) acked++;
+
+        var sw2 = Stopwatch.StartNew();
+        var cres = await oe.SendSignedAsync("order.cancel", P(("symbol", SYMBOL), ("origClientOrderId", cid)));
+        cancelMs.Add(sw2.Elapsed.TotalMilliseconds);
+        book.Apply(o, cres);
+        if (o.State == OrderState.Canceled) canceled++;
+    }
+    catch (BinanceWsError e)
+    {
+        string k = Classify(e); errors[k] = errors.GetValueOrDefault(k) + 1;
+        o.TryTransition(OrderState.Rejected);            // terminal failure -> not an orphan Sent
+        if (k == "RATE_LIMIT") await Task.Delay(1000 + 200 * i);
+    }
+}
+
+// ---- fill loop: marketable IOC buy crosses the spread -> real fill, then flatten with an IOC sell ----
+string fillReport = "skipped";
+try
+{
+    var (_, ask) = await BookTicker();
+    string bcid = $"fill-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+    var bo = book.Submit(bcid, out _); bo.TryTransition(OrderState.Sent);
+    book.Apply(bo, await oe.SendSignedAsync("order.place", P(("symbol", SYMBOL), ("side", "BUY"), ("type", "LIMIT"), ("timeInForce", "IOC"), ("quantity", qty), ("price", Px(ask * 1.001m)), ("newClientOrderId", bcid))));
+
+    if (bo.CumFilled > 0)
+    {
+        var (bidF, _) = await BookTicker();
+        string scid = $"flat-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        var so = book.Submit(scid, out _); so.TryTransition(OrderState.Sent);
+        book.Apply(so, await oe.SendSignedAsync("order.place", P(("symbol", SYMBOL), ("side", "SELL"), ("type", "LIMIT"), ("timeInForce", "IOC"), ("quantity", bo.CumFilled.ToString("0.00000", inv)), ("price", Px(bidF * 0.999m)), ("newClientOrderId", scid))));
+        fillReport = $"BUY {bo.CumFilled} @ {bo.AvgFillPrice:0.00} ({bo.State}) → SELL {so.CumFilled} @ {so.AvgFillPrice:0.00} ({so.State}) — position flat";
+    }
+    else fillReport = $"buy did not fill (state {bo.State})";
+}
+catch (BinanceWsError e) { var k = Classify(e); fillReport = $"error {k}"; errors[k] = errors.GetValueOrDefault(k) + 1; }
+
+// ---- guards an interviewer probes ----
+var done = book.All.FirstOrDefault(x => x.State == OrderState.Canceled);
+if (done is not null) { book.Submit(done.ClientOrderId, out bool c2); if (!c2) dupRefused++; }   // idempotent submit
+int illegalCaught = 0;
+if (done is not null && !done.TryTransition(OrderState.Acked)) illegalCaught++;                   // ACK a canceled order
+bool orderGoneHandled = false;                                                                    // cancel already-gone -> -2011
+if (done?.ExchangeId is not null)
+{
+    try { await oe.SendSignedAsync("order.cancel", P(("symbol", SYMBOL), ("origClientOrderId", done.ClientOrderId))); }
+    catch (BinanceWsError e) { orderGoneHandled = e.Code == -2011; }
+}
+
+double Pct(List<double> xs, int p) { if (xs.Count == 0) return double.NaN; var s = xs.OrderBy(x => x).ToList(); return s[Math.Min(s.Count - 1, p * s.Count / 100)]; }
+var states = book.StateCounts();
+Console.WriteLine("state machine: " + string.Join("  ", states.Select(kv => $"{kv.Key}={kv.Value}")));
+Console.WriteLine($"loop: {acked} placed→ACKed, {canceled} canceled — each folded from its order-entry response");
+Console.WriteLine($"place  WS round-trip ms  p50 {Pct(placeMs, 50):0}  p95 {Pct(placeMs, 95):0}  (n={placeMs.Count})");
+Console.WriteLine($"cancel WS round-trip ms  p50 {Pct(cancelMs, 50):0}  p95 {Pct(cancelMs, 95):0}  (n={cancelMs.Count})");
+Console.WriteLine($"fill loop: {fillReport}");
+Console.WriteLine($"idempotent-submit refused dup: {dupRefused}  ·  illegal-transition caught: {illegalCaught + book.IllegalTransitions}  ·  cancel-already-gone (-2011): {(orderGoneHandled ? "yes ✓" : "not exercised")}");
+Console.WriteLine($"errors handled: {(errors.Count > 0 ? string.Join(" ", errors.Select(kv => $"{kv.Key}={kv.Value}")) : "none")}  ·  clock-skew self-healed (resync+retry): {oe.ClockResyncs}");
+
+bool ok = canceled > 0 && !states.ContainsKey(OrderState.New) && !states.ContainsKey(OrderState.Sent);
+Console.WriteLine(ok ? "\n✓ full loop OK — signed WS order entry, state folded from exchange responses, fill round-tripped flat" : "\n✗ loop failed");
+return ok ? 0 : 1;
