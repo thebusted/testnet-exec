@@ -99,10 +99,105 @@ async Task<int> ReactDemo()
     return reactor.Dispatched > 0 ? 0 : 1;
 }
 
+// Live monitor — the server-side backend for the web dashboard. Runs forever: live market book +
+// queue + imbalance refreshed every tick (~5s), a real execution cycle (place→cancel, periodically a
+// fill→flatten) every ~20s, and writes state.json atomically each tick for the frontend to poll.
+// Keys stay server-side; this is why the dashboard can be live without exposing a secret in a browser.
+async Task<int> MonitorLoop(long off)
+{
+    const string WSSTREAM = "wss://stream.testnet.binance.vision";
+    string statePath = Environment.GetEnvironmentVariable("STATE_PATH") ?? "state.json";
+    var hb = new HybridBook(40000);
+    await using var feed = new MarketFeed(hb, http, WSSTREAM, SYMBOL);
+    await feed.StartAsync();
+    var ob = new OwnOrderBook();
+    await using var oe = new WsOrderClient(WSAPI, key!, secret!);
+    oe.SetServerOffset(off); oe.SetResync(ServerOffset);
+    await oe.ConnectAsync();
+
+    var up = Stopwatch.StartNew();
+    long cycle = 0, totalOrders = 0, totalFills = 0;
+    var placeMs = new List<double>(); var cancelMs = new List<double>();
+    object lastExec = new { kind = "warming up" };
+    var jopts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+    double Pctl(List<double> xs, int p) { if (xs.Count == 0) return 0; var s = xs.OrderBy(x => x).ToList(); return Math.Round(s[Math.Min(s.Count - 1, p * s.Count / 100)]); }
+
+    void WriteState()
+    {
+        var (bt, at) = feed.Best();
+        double? bid = bt is int b ? b / 100.0 : null, ask = at is int a ? a / 100.0 : null;
+        long bq = bt is int bb ? feed.QtyAt(true, bb) : 0, aq = at is int aa ? feed.QtyAt(false, aa) : 0;
+        double imb = (bq + aq) > 0 ? (double)(bq - aq) / (bq + aq) : 0;
+        var state = new
+        {
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            uptimeSec = (long)up.Elapsed.TotalSeconds,
+            cycles = cycle,
+            symbol = SYMBOL,
+            market = new { bid, ask, spread = bid.HasValue && ask.HasValue ? Math.Round(ask.Value - bid.Value, 2) : (double?)null },
+            imbalanceL1 = Math.Round(imb, 3),
+            queue = bid.HasValue ? new { price = bid, aheadBtc = Math.Round(bq / 1e8, 5) } : null,
+            lastExec,
+            totals = new { orders = totalOrders, fills = totalFills },
+        };
+        var tmp = statePath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(state, jopts));
+        File.Move(tmp, statePath, true);   // atomic swap so the frontend never reads a half-written file
+    }
+
+    Console.WriteLine($"live monitor → {statePath} · market/queue every ~5s, exec cycle ~20s");
+    while (true)
+    {
+        if (cycle % 4 == 0)   // execution cycle every ~20s (rate-limited, never spams the exchange)
+        {
+            var (btk, atk) = feed.Best();
+            if (btk is int bTick && atk is int aTick)
+            {
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                try
+                {
+                    if (cycle % 16 == 0)   // ~every 80s: a real fill, immediately flattened
+                    {
+                        string bcid = $"mon-fill-{now}"; var bo = ob.Submit(bcid, out _); bo.TryTransition(OrderState.Sent);
+                        ob.Apply(bo, await oe.SendSignedAsync("order.place", P(("symbol", SYMBOL), ("side", "BUY"), ("type", "LIMIT"), ("timeInForce", "IOC"), ("quantity", qty), ("price", Px(aTick / 100m * 1.001m)), ("newClientOrderId", bcid))));
+                        totalOrders++;
+                        if (bo.CumFilled > 0)
+                        {
+                            totalFills++;
+                            string scid = $"mon-flat-{now}"; var so = ob.Submit(scid, out _); so.TryTransition(OrderState.Sent);
+                            ob.Apply(so, await oe.SendSignedAsync("order.place", P(("symbol", SYMBOL), ("side", "SELL"), ("type", "LIMIT"), ("timeInForce", "IOC"), ("quantity", bo.CumFilled.ToString("0.00000", inv)), ("price", Px(bTick / 100m * 0.999m)), ("newClientOrderId", scid))));
+                            totalOrders++; if (so.CumFilled > 0) totalFills++;
+                            lastExec = new { kind = "fill", buy = $"{bo.CumFilled:0.00000} @ {bo.AvgFillPrice:0.00}", sell = $"{so.CumFilled:0.00000} @ {so.AvgFillPrice:0.00}", flat = true, at = now };
+                        }
+                        else lastExec = new { kind = "fill", note = $"IOC did not fill ({bo.State})", at = now };
+                    }
+                    else   // resting place → cancel, measured
+                    {
+                        string cid = $"mon-{now}"; var o = ob.Submit(cid, out _); o.TryTransition(OrderState.Sent);
+                        var sw = Stopwatch.StartNew();
+                        var pr = await oe.SendSignedAsync("order.place", P(("symbol", SYMBOL), ("side", "BUY"), ("type", "LIMIT"), ("timeInForce", "GTC"), ("quantity", qty), ("price", Px(bTick / 100m * 0.9m)), ("newClientOrderId", cid)));
+                        placeMs.Add(sw.Elapsed.TotalMilliseconds); if (placeMs.Count > 50) placeMs.RemoveAt(0);
+                        o.ExchangeId = pr.GetProperty("orderId").GetInt64(); ob.Apply(o, pr); totalOrders++;
+                        var sw2 = Stopwatch.StartNew();
+                        ob.Apply(o, await oe.SendSignedAsync("order.cancel", P(("symbol", SYMBOL), ("origClientOrderId", cid))));
+                        cancelMs.Add(sw2.Elapsed.TotalMilliseconds); if (cancelMs.Count > 50) cancelMs.RemoveAt(0);
+                        lastExec = new { kind = "rest", state = o.State.ToString(), placeP50 = Pctl(placeMs, 50), placeP95 = Pctl(placeMs, 95), cancelP50 = Pctl(cancelMs, 50), clockResyncs = oe.ClockResyncs, at = now };
+                    }
+                }
+                catch (BinanceWsError e) { lastExec = new { kind = "error", code = e.Code, msg = e.Message, at = now }; }
+            }
+        }
+        WriteState();
+        cycle++;
+        await Task.Delay(5000);
+    }
+}
+
 long offset = await ServerOffset();
 string mode = Environment.GetEnvironmentVariable("MODE") ?? "loop";
 if (mode == "book") return await BookDemo(offset);
 if (mode == "react") return await ReactDemo();
+if (mode == "monitor") return await MonitorLoop(offset);
 var (bid0, ask0) = await BookTicker();
 string restPrice = Px(bid0 * 0.9m);
 Console.WriteLine($"clock offset ≈ {offset}ms · market {bid0:0.00}/{ask0:0.00} · resting BUY {qty} @ {restPrice} · {reps} reps\n");
