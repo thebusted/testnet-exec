@@ -24,7 +24,10 @@ main.stale .panel{opacity:.55;transition:opacity .3s}
 .execP{grid-column:1/8}.mktP{grid-column:8/13}
 .row{display:flex;justify-content:space-between;font-size:12.5px;padding:3px 0;border-bottom:1px dashed #171d25}
 .row .l{color:var(--mut)}
-.px{display:flex;gap:14px;font-size:13px;margin-bottom:8px}.px .b{color:var(--grn)}.px .a{color:var(--red)}.px .sp{color:var(--faint);margin-left:auto}
+.px{display:flex;gap:14px;font-size:13px;margin-bottom:6px}.px .b{color:var(--grn)}.px .a{color:var(--red)}.px .sp{color:var(--faint);margin-left:auto}
+.xspread{display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:1px dashed #171d25}.xspread .l{color:var(--mut)}
+.laddhd{font-size:11px;color:var(--faint);margin:8px 0 2px}
+#wsstat{font-size:11px;color:var(--faint)}#wsstat.ok{color:var(--grn)}#wsstat.part{color:var(--amb)}#wsstat.down{color:var(--red)}
 .ladder{margin-top:6px}
 .drow{display:grid;grid-template-columns:34px 1fr 48px;gap:8px;align-items:center;padding:2px 2px;font-size:11.5px}
 .dbar{position:relative;height:9px;background:#0d1219;border-radius:2px;overflow:hidden;display:flex}
@@ -84,8 +87,10 @@ svg{display:block;width:100%;overflow:visible}
   </section>
 
   <section class="panel mktP">
-    <div class="ph"><span class="lbl">market · depth-weighted imbalance</span></div>
-    <div class="px" id="px"></div>
+    <div class="ph"><span class="lbl">market · live WebSocket</span><span class="ec" id="wsstat">● connecting…</span></div>
+    <div class="px" id="px"><span class="sp">waiting for stream…</span></div>
+    <div class="xspread" id="xspread"></div>
+    <div class="laddhd">depth-weighted imbalance · $50→$20K (server book, polled)</div>
     <div class="ladder" id="ladder"></div>
   </section>
 
@@ -142,8 +147,7 @@ function renderExec(s){
     .map(([l,v])=>`<div class="t"><div class="l" style="font-size:10px;color:var(--mut)">${l}</div><div class="lv">${v??'—'}<span class="u"> ms</span></div></div>`).join('');
   $('sess').innerHTML=[['orders',s.totals?.orders??0],['fills',s.totals?.fills??0,'var(--grn)'],['cycles',s.cycles??0]]
     .map(([l,v,c])=>`<div><div class="l" style="font-size:10px;color:var(--mut)">${l}</div><div class="n" ${c?`style="color:${c}"`:''}>${v}</div></div>`).join('');
-  const m=s.market||{};
-  $('px').innerHTML=`<span class="b">$${num(m.bid||0)}</span><span class="a">$${num(m.ask||0)}</span><span class="sp">spread $${num(m.spread||0)}</span>`;
+  // #px (bid/ask/spread) is driven live by the browser WebSocket below, not the polled state.
   const d=s.depth;
   if(d&&d.imb){
     const scale=Math.max(1e-9,Math.max(...d.bid,...d.ask));
@@ -238,7 +242,42 @@ async function poll(){
   $('main').className=age>45?'stale':'';
   setTimeout(poll,2500);
 }
-renderCal(); renderEq(); poll();
+// --- browser WebSocket to the exchanges — real-time top-of-book, like btc-orderbook.ggez.work.
+// ponytail: only MARKET data streams here (bid/ask/spread + live cross-venue spread). The exec console
+// and paper P&L are server-side computations — polled above, can't come from a browser exchange socket.
+let bnBid=0,bnAsk=0,byBid=0,byAsk=0,wsBn=false,wsBy=false;
+function wsStat(){
+  const el=$('wsstat');
+  if(wsBn&&wsBy){el.className='ok';el.textContent='● live · Binance + Bybit';}
+  else if(wsBn||wsBy){el.className='part';el.textContent='● live · '+(wsBn?'Binance':'Bybit')+' (other reconnecting)';}
+  else{el.className='down';el.textContent='● reconnecting…';}
+}
+function renderMkt(){
+  if(!bnBid) return;
+  const mid=(bnBid+bnAsk)/2, sp=bnAsk-bnBid;
+  $('px').innerHTML=`<span class="b">bid $${num(bnBid)}</span><span class="a">ask $${num(bnAsk)}</span><span class="sp">spread $${num(sp)}</span>`;
+  if(byBid&&byAsk){
+    const byMid=(byBid+byAsk)/2, x=mid-byMid;
+    $('xspread').innerHTML=`<span class="l">cross-venue spread · Binance − Bybit</span><span style="color:${x>0?'var(--grn)':x<0?'var(--red)':'var(--fg)'}">${(x>0?'+':'')}$${x.toFixed(2)}</span>`;
+  }
+}
+function wsBinance(){
+  const c=()=>{ let ws; try{ws=new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@bookTicker');}catch(_){setTimeout(c,2000);return;}
+    ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.b){bnBid=+d.b;bnAsk=+d.a;wsBn=true;wsStat();renderMkt();}};
+    ws.onclose=()=>{wsBn=false;wsStat();setTimeout(c,2000);};
+    ws.onerror=()=>{try{ws.close();}catch(_){}}; };
+  c();
+}
+function wsBybit(){
+  const c=()=>{ let ws; try{ws=new WebSocket('wss://stream.bybit.com/v5/public/spot');}catch(_){setTimeout(c,2000);return;}
+    let ping;
+    ws.onopen=()=>{ws.send(JSON.stringify({op:'subscribe',args:['orderbook.1.BTCUSDT']}));ping=setInterval(()=>ws.readyState===1&&ws.send(JSON.stringify({op:'ping'})),20000);};
+    ws.onmessage=e=>{const m=JSON.parse(e.data);const d=m.data;if(d){if(d.b&&d.b.length)byBid=+d.b[0][0];if(d.a&&d.a.length)byAsk=+d.a[0][0];if(byBid&&byAsk){wsBy=true;wsStat();renderMkt();}}};
+    ws.onclose=()=>{clearInterval(ping);wsBy=false;wsStat();setTimeout(c,2000);};
+    ws.onerror=()=>{try{ws.close();}catch(_){}}; };
+  c();
+}
+renderCal(); renderEq(); poll(); wsBinance(); wsBybit();
 })();
 </script>
 </body></html>
