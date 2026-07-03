@@ -181,6 +181,17 @@ public sealed class HybridBook
         }
     }
 
+    // Reset the whole book — needed when a venue (e.g. Bybit) re-sends a full snapshot and the
+    // local book must be rebuilt from scratch rather than diffed.
+    public void Clear()
+    {
+        Array.Clear(bidQ); Array.Clear(askQ);
+        farBid.Clear(); farAsk.Clear();
+        bbTick = int.MinValue; baTick = int.MaxValue;
+        inited = false; lo = 0;
+        shifts = spills = updates = 0;
+    }
+
     public int BB() { int b = TrueBB(); return b == int.MinValue ? -1 : b; }
     public int BA() { int a = TrueBA(); return a == int.MaxValue ? -1 : a; }
     public int? BestBidTick() { int b = TrueBB(); return b == int.MinValue ? null : b; }
@@ -194,6 +205,27 @@ public sealed class HybridBook
         if (InWin(tick)) return (isBid ? bidQ : askQ)[Slot(tick)];
         var far = isBid ? farBid : farAsk;
         return far.TryGetValue(tick, out var q) ? q : 0;
+    }
+
+    // Cumulative resting quantity within ±radiusTicks of mid — the depth-weighted imbalance input.
+    // Sums the flat window AND the far map, so a wide radius (e.g. $6000) that spills past the hot
+    // window still counts the cold-tail liquidity. Returns raw 1e-8 units per side.
+    public (long bid, long ask) DepthSum(int radiusTicks)
+    {
+        int bb = TrueBB(), ba = TrueBA();
+        if (bb == int.MinValue || ba == int.MaxValue) return (0, 0);
+        long mid = ((long)bb + ba) / 2, bidLo = mid - radiusTicks, askHi = mid + radiusTicks;
+        long bidSum = 0, askSum = 0;
+        if (inited)
+            for (int t = lo; t < lo + N; t++)
+            {
+                int s = Slot(t);
+                if (t <= mid && t >= bidLo) bidSum += bidQ[s];
+                if (t >= mid && t <= askHi) askSum += askQ[s];
+            }
+        foreach (var kv in farBid) if (kv.Key <= mid && kv.Key >= bidLo) bidSum += kv.Value;
+        foreach (var kv in farAsk) if (kv.Key >= mid && kv.Key <= askHi) askSum += kv.Value;
+        return (bidSum, askSum);
     }
 
     // Full-book signature over hot window + far map — used by ob_live_test to prove the

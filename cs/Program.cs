@@ -15,6 +15,9 @@ const string SYMBOL = "BTCUSDT";
 int reps = int.TryParse(Environment.GetEnvironmentVariable("REPS"), out var r) ? r : 5;
 string qty = Environment.GetEnvironmentVariable("QTY") ?? "0.00030";
 
+// paper mode is pure market data (public, no keys) — dispatch before the execution-key check.
+if ((Environment.GetEnvironmentVariable("MODE") ?? "loop") == "paper") return await PaperLoop();
+
 var key = Environment.GetEnvironmentVariable("BINANCE_TESTNET_KEY");
 var secret = Environment.GetEnvironmentVariable("BINANCE_TESTNET_SECRET");
 if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(secret))
@@ -76,6 +79,59 @@ async Task<int> BookDemo(long off)
     return o.State == OrderState.Canceled ? 0 : 1;
 }
 
+// Paper trade — pure simulation on live MAINNET books (Binance + Bybit), no orders. Each venue runs an
+// imbalance-momentum PaperTrader; marks P&L net of fees so the edge measurement is honest. Writes
+// paper-state.json for the dashboard. No keys needed (public market data on both venues).
+async Task<int> PaperLoop()
+{
+    string statePath = Environment.GetEnvironmentVariable("PAPER_STATE") ?? "paper-state.json";
+    var jopts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+    var up = Stopwatch.StartNew();
+
+    var bnBook = new HybridBook(40000);
+    var bnHttp = new HttpClient { BaseAddress = new Uri("https://api.binance.com") };
+    IFeed bn = new MarketFeed(bnBook, bnHttp, "wss://stream.binance.com:9443", SYMBOL);
+    var byBook = new HybridBook(40000);
+    IFeed by = new BybitFeed(byBook, SYMBOL);
+    await bn.StartAsync();
+    await by.StartAsync();
+
+    var feeds = new[] { bn, by };
+    var traders = new[] { new PaperTrader("binance"), new PaperTrader("bybit") };
+
+    Console.WriteLine($"paper trade → {statePath} · imbalance-momentum, mark-to-market net of fees, Binance + Bybit mainnet");
+    long cycle = 0;
+    while (true)
+    {
+        for (int i = 0; i < feeds.Length; i++)
+        {
+            var (btk, atk) = feeds[i].Best();
+            traders[i].OnTick(btk, atk, feeds[i].DepthSum(traders[i].SignalRadiusTicks));
+        }
+        var venues = traders.Select(t => new
+        {
+            venue = t.Venue,
+            position = t.Position.ToString(),
+            entry = Math.Round(t.EntryPrice, 2),
+            imb = Math.Round(t.LastImb, 3),
+            mid = Math.Round(t.LastMid, 2),
+            realizedPnl = Math.Round(t.RealizedPnl, 4),
+            unrealizedPnl = Math.Round(t.Unrealized, 4),
+            equityPnl = Math.Round(t.EquityPnl, 4),
+            fees = Math.Round(t.FeesPaid, 4),
+            trades = t.Trades,
+            wins = t.Wins,
+            winRate = Math.Round(t.WinRate, 3),
+        }).ToArray();
+        var state = new { ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), uptimeSec = (long)up.Elapsed.TotalSeconds, cycles = cycle, symbol = SYMBOL, signalUsd = 50, venues };
+        var tmp = statePath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(state, jopts));
+        File.Move(tmp, statePath, true);
+        cycle++;
+        await Task.Delay(1000);   // sample the signal + mark every 1s
+    }
+}
+
 // S4 — async event reactor: the live book streams into a single-consumer channel; a Strategy reacts
 // to each tick in arrival order (no locks in the strategy). Read-only market data, no orders.
 async Task<int> ReactDemo()
@@ -105,10 +161,13 @@ async Task<int> ReactDemo()
 // Keys stay server-side; this is why the dashboard can be live without exposing a secret in a browser.
 async Task<int> MonitorLoop(long off)
 {
-    const string WSSTREAM = "wss://stream.testnet.binance.vision";
+    // MAINNET market data (public depth stream, no key) → real deep book for $6K/$10K/$20K macro imbalance.
+    // Execution stays on the testnet WS-API (keys server-side). Honest split: market=mainnet, exec=testnet.
+    const string WSSTREAM = "wss://stream.binance.com:9443";
     string statePath = Environment.GetEnvironmentVariable("STATE_PATH") ?? "state.json";
     var hb = new HybridBook(40000);
-    await using var feed = new MarketFeed(hb, http, WSSTREAM, SYMBOL);
+    var mktHttp = new HttpClient { BaseAddress = new Uri("https://api.binance.com") };
+    await using var feed = new MarketFeed(hb, mktHttp, WSSTREAM, SYMBOL);
     await feed.StartAsync();
     var ob = new OwnOrderBook();
     await using var oe = new WsOrderClient(WSAPI, key!, secret!);
@@ -128,6 +187,16 @@ async Task<int> MonitorLoop(long off)
         double? bid = bt is int b ? b / 100.0 : null, ask = at is int a ? a / 100.0 : null;
         long bq = bt is int bb ? feed.QtyAt(true, bb) : 0, aq = at is int aa ? feed.QtyAt(false, aa) : 0;
         double imb = (bq + aq) > 0 ? (double)(bq - aq) / (bq + aq) : 0;
+        // depth-weighted imbalance over a range of radii ($ from mid) — public depth feed, no key needed.
+        // Frontend picks any bucket (dynamic); $6000 = macro pressure, $50 = touch. steadier than L1.
+        int[] dUsd = { 50, 100, 200, 400, 1000, 2000, 6000, 10000, 20000 };
+        var dBid = new double[dUsd.Length]; var dAsk = new double[dUsd.Length]; var dImb = new double[dUsd.Length];
+        for (int i = 0; i < dUsd.Length; i++)
+        {
+            var (db, da) = feed.DepthSum(dUsd[i] * 100);
+            dBid[i] = Math.Round(db / 1e8, 4); dAsk[i] = Math.Round(da / 1e8, 4);
+            dImb[i] = (db + da) > 0 ? Math.Round((double)(db - da) / (db + da), 3) : 0;
+        }
         var state = new
         {
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
@@ -136,6 +205,7 @@ async Task<int> MonitorLoop(long off)
             symbol = SYMBOL,
             market = new { bid, ask, spread = bid.HasValue && ask.HasValue ? Math.Round(ask.Value - bid.Value, 2) : (double?)null },
             imbalanceL1 = Math.Round(imb, 3),
+            depth = new { buckets = dUsd, bid = dBid, ask = dAsk, imb = dImb },
             queue = bid.HasValue ? new { price = bid, aheadBtc = Math.Round(bq / 1e8, 5) } : null,
             lastExec,
             totals = new { orders = totalOrders, fills = totalFills },
@@ -198,6 +268,7 @@ string mode = Environment.GetEnvironmentVariable("MODE") ?? "loop";
 if (mode == "book") return await BookDemo(offset);
 if (mode == "react") return await ReactDemo();
 if (mode == "monitor") return await MonitorLoop(offset);
+if (mode == "paper") return await PaperLoop();
 var (bid0, ask0) = await BookTicker();
 string restPrice = Px(bid0 * 0.9m);
 Console.WriteLine($"clock offset ≈ {offset}ms · market {bid0:0.00}/{ask0:0.00} · resting BUY {qty} @ {restPrice} · {reps} reps\n");

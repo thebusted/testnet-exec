@@ -1,0 +1,221 @@
+@page "/"
+@implements IDisposable
+@inject HttpClient Http
+@using System.Text.Json
+
+<header>
+    <span class="brand">EXEC</span><span class="sym">· @(s?.symbol ?? "BTCUSDT")</span>
+    <span class="badge" style="border-color:var(--blue);color:var(--blue)">MAINNET MKT</span>
+    <span class="badge">TESTNET EXEC</span>
+    <span class="wasm">BLAZOR WASM</span>
+    <span class="live"><span class="dot @dotClass"></span><span>@liveState</span></span>
+    <span class="kv">up <b>@Dur(s?.uptimeSec ?? 0)</b></span>
+    <span class="kv">cycles <b>@(s?.cycles ?? 0)</b></span>
+    <span class="kv">tick age <b>@(tickAge < 10 ? tickAge.ToString("0.0") : Math.Round(tickAge).ToString())s</b></span>
+    <span class="clock">@clock UTC</span>
+</header>
+
+<main class="@(mainStale ? "stale" : "")">
+    <section class="panel consoleP">
+        <div class="ph"><span class="lbl">execution console</span>
+            <span class="ec">-1021 resyncs <b class="@(Resyncs>0?"warn":"")">@(Resyncs>0?Resyncs.ToString():"✓")</b> · -2011 handled <b>✓</b></span></div>
+        <div class="lifecycle">
+            @{ var lit = Lifecycle(); }
+            @for (int i = 0; i < Life.Length; i++)
+            {
+                var li = i;
+                <span class="pill @(li==lit.cur ? "on"+(lit.fill?" fill":"") : (lit.path.Contains(li)?"done":""))">@Life[li]</span>
+                @if (li < Life.Length - 1) { <span class="arr">→</span> }
+            }
+        </div>
+        <div class="ltiles">
+            <div class="ltile"><div class="lbl">place p50</div><div class="lv">@(P50?.ToString() ?? "—")<span class="u"> ms</span></div><svg viewBox="0 0 100 16" preserveAspectRatio="none"><polyline points="@Spark(ringP50)" fill="none" stroke="var(--cyan)" stroke-width="1" opacity=".45"/></svg></div>
+            <div class="ltile"><div class="lbl">place p95</div><div class="lv">@(P95?.ToString() ?? "—")<span class="u"> ms</span></div><svg viewBox="0 0 100 16" preserveAspectRatio="none"><polyline points="@Spark(ringP95)" fill="none" stroke="var(--cyan)" stroke-width="1" opacity=".45"/></svg></div>
+            <div class="ltile"><div class="lbl">cancel p50</div><div class="lv">@(C50?.ToString() ?? "—")<span class="u"> ms</span></div><svg viewBox="0 0 100 16" preserveAspectRatio="none"><polyline points="@Spark(ringC50)" fill="none" stroke="var(--cyan)" stroke-width="1" opacity=".45"/></svg></div>
+        </div>
+        <div class="subline">place→cancel every ~20s · real fill→flatten every ~80s · keys never leave the VPS</div>
+        <div class="tape">
+            @foreach (var r in tape)
+            {
+                <div class="row @r.Cls" @key="r.Key"><span class="t">@r.T</span><span class="k">@r.K</span><span class="d">@r.D</span><span class="s">@r.S</span></div>
+            }
+        </div>
+    </section>
+
+    <section class="panel marketP">
+        <div class="ph"><span class="lbl">market · depth-weighted imbalance</span></div>
+        <div class="px"><span class="b">@Money(s?.market?.bid)</span><span class="a">@Money(s?.market?.ask)</span><span class="sp">spread <b>@Money(s?.market?.spread)</b></span></div>
+        <div class="imbRead"><div class="v" style="color:@ImbColor(SelImb)">@Sign(SelImb)</div><div class="sub">@SelSub</div></div>
+        <div class="l1">L1 (fragile) @Sign(s?.imbalanceL1 ?? 0)</div>
+        <div class="ladder">
+            @if (s?.depth != null)
+            {
+                var scale = Math.Max(1e-9, Math.Max(s.depth.bid.DefaultIfEmpty(0).Max(), s.depth.ask.DefaultIfEmpty(0).Max()));
+                @for (int i = 0; i < Lbl.Length && i < s.depth.imb.Length; i++)
+                {
+                    var bi = i;
+                    <div class="drow @(sel==bi?"sel":"")" @onclick="() => sel=bi">
+                        <span class="dl">@Lbl[bi]</span>
+                        <div class="dbar">
+                            <div class="dbid" style="width:@((s.depth.bid[bi]/scale*50).ToString("0.#"))%"></div>
+                            <div class="dask" style="width:@((s.depth.ask[bi]/scale*50).ToString("0.#"))%"></div>
+                        </div>
+                        <span class="dv" style="color:@ImbColor(s.depth.imb[bi])">@Sign(s.depth.imb[bi])</span>
+                    </div>
+                }
+            }
+        </div>
+        <input type="range" min="0" max="8" step="1" @bind="sel" @bind:event="oninput" />
+    </section>
+
+    <section class="panel queueP stat">
+        <div class="ph"><span class="lbl">queue position</span></div>
+        <div class="v">@(s?.queue != null ? s.queue.aheadBtc.ToString("0.000")+" BTC" : "—")</div>
+        <div class="faint" style="font-size:11px">BTC resting ahead at best bid</div>
+        <div class="qbar"><div style="width:@(Math.Min(100, (s?.queue?.aheadBtc ?? 0)/15*100).ToString("0.#"))%"></div></div>
+    </section>
+
+    <section class="panel relP">
+        <div class="ph"><span class="lbl">reliability</span></div>
+        <div class="rel3" style="margin-top:6px">
+            <div class="c"><div class="lbl">clock -1021</div><div class="n @(Resyncs>0?"warn":"ok")">@Resyncs</div><div class="faint" style="font-size:10px">self-heal</div></div>
+            <div class="c"><div class="lbl">cancel -2011</div><div class="n ok">0</div><div class="faint" style="font-size:10px">handled</div></div>
+            <div class="c"><div class="lbl">last cycle</div><div class="n" style="font-size:16px;margin-top:6px;color:@KindColor">@(s?.lastExec?.kind ?? "—")</div></div>
+        </div>
+    </section>
+
+    <section class="panel sessP">
+        <div class="ph"><span class="lbl">session</span></div>
+        <div class="rel3" style="margin-top:6px">
+            <div class="c"><div class="lbl">orders</div><div class="n" style="font-size:26px">@(s?.totals?.orders ?? 0)</div></div>
+            <div class="c"><div class="lbl">fills</div><div class="n" style="font-size:26px;color:var(--grn)">@(s?.totals?.fills ?? 0)</div></div>
+            <div class="c"><div class="lbl">cycles</div><div class="n" style="font-size:26px">@(s?.cycles ?? 0)</div></div>
+        </div>
+        <div class="faint" style="font-size:11px;margin-top:auto">C# engine on VPS · Blazor WASM front · <a href="https://github.com/thebusted/testnet-exec" style="color:var(--blue);text-decoration:none">source</a></div>
+    </section>
+</main>
+<div class="foot"><a href="/writeup.html">how it works + code</a></div>
+
+@code {
+    static readonly string[] Lbl = { "$50", "$100", "$200", "$400", "$1K", "$2K", "$6K", "$10K", "$20K" };
+    static readonly string[] Life = { "NEW", "ACKED", "FILLED", "CANCELED", "FLAT" };
+
+    St? s;
+    long lastTs, lastExecAt;
+    int sel = 6;   // default view = $6K macro imbalance (the interesting depth)
+    double tickAge = 999;
+    string clock = "", dotClass = "live", liveState = "LIVE";
+    bool mainStale;
+    readonly List<double> ringP50 = new(), ringP95 = new(), ringC50 = new();
+    readonly List<TapeRow> tape = new();
+    System.Threading.Timer? _poll, _tick;
+
+    int Resyncs => s?.lastExec?.clockResyncs ?? 0;
+    int? P50 => s?.lastExec?.kind == "rest" ? s.lastExec.placeP50 : (ringP50.Count > 0 ? (int)ringP50[^1] : (int?)null);
+    int? P95 => s?.lastExec?.kind == "rest" ? s.lastExec.placeP95 : (ringP95.Count > 0 ? (int)ringP95[^1] : (int?)null);
+    int? C50 => s?.lastExec?.kind == "rest" ? s.lastExec.cancelP50 : (ringC50.Count > 0 ? (int)ringC50[^1] : (int?)null);
+    double SelImb => s?.depth != null && sel < s.depth.imb.Length ? s.depth.imb[sel] : 0;
+    string SelSub => s?.depth != null && sel < s.depth.bid.Length
+        ? $"bid {s.depth.bid[sel]:0.00} / ask {s.depth.ask[sel]:0.00} BTC @ {Lbl[sel]} radius" : "—";
+    string KindColor => s?.lastExec?.kind switch { "error" => "var(--amb)", "fill" => "var(--grn)", _ => "var(--fg)" };
+
+    protected override void OnInitialized()
+    {
+        _poll = new System.Threading.Timer(async _ => await Poll(), null, 0, 2500);
+        _tick = new System.Threading.Timer(_ => Tick(), null, 250, 250);
+    }
+
+    async Task Poll()
+    {
+        try
+        {
+            var st = await Http.GetFromJsonAsync<St>($"state.json?_={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}");
+            if (st != null) { s = st; lastTs = st.ts; OnState(st); }
+        }
+        catch { }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    void OnState(St st)
+    {
+        var e = st.lastExec;
+        if (e?.kind == "rest")
+        {
+            Push(ringP50, e.placeP50); Push(ringP95, e.placeP95); Push(ringC50, e.cancelP50);
+        }
+        if (e != null && e.at != 0 && e.at != lastExecAt)
+        {
+            lastExecAt = e.at;
+            var t = DateTimeOffset.FromUnixTimeMilliseconds(e.at).UtcDateTime.ToString("HH:mm:ss.fff");
+            TapeRow row = e.kind switch
+            {
+                "rest" => new(t, "REST", $"place {Money(st.market?.bid * 0.9)} → ack {e.placeP50}ms → cancel {e.cancelP50}ms", e.state == "Canceled" ? "ok" : e.state ?? "", "rest"),
+                "fill" => new(t, "FILL", $"buy {e.buy} → sell {e.sell}", e.flat ? "+flat" : e.note ?? "", "fill"),
+                "error" => new(t, "ERR", $"{e.code} {e.msg} → resync → retry", "healed", "err"),
+                _ => new(t, e.kind, "", "", "rest"),
+            };
+            tape.Insert(0, row);
+            while (tape.Count > 40) tape.RemoveAt(tape.Count - 1);
+        }
+    }
+
+    void Tick()
+    {
+        tickAge = lastTs > 0 ? (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - lastTs) / 1000.0 : 999;
+        clock = DateTime.UtcNow.ToString("HH:mm:ss");
+        if (tickAge > 45) { dotClass = "dead"; liveState = "DISCONNECTED"; mainStale = true; }
+        else if (tickAge > 15) { dotClass = "stale"; liveState = "STALE"; mainStale = false; }
+        else { dotClass = "live"; liveState = "LIVE"; mainStale = false; }
+        InvokeAsync(StateHasChanged);
+    }
+
+    static void Push(List<double> a, double v) { a.Add(v); if (a.Count > 60) a.RemoveAt(0); }
+
+    (int cur, bool fill, int[] path) Lifecycle()
+    {
+        var e = s?.lastExec;
+        int[] path = e?.kind switch
+        {
+            "fill" => e.flat ? new[] { 0, 1, 2, 4 } : new[] { 0, 1, 2 },
+            "rest" => e.state == "Canceled" ? new[] { 0, 1, 3 } : new[] { 0, 1 },
+            "error" => new[] { 0 },
+            _ => Array.Empty<int>(),
+        };
+        return (path.Length > 0 ? path[^1] : -1, e?.kind == "fill", path);
+    }
+
+    string Spark(List<double> a)
+    {
+        if (a.Count < 2) return "";
+        double mn = a.Min(), mx = a.Max(), r = mx - mn == 0 ? 1 : mx - mn;
+        return string.Join(" ", a.Select((v, i) => $"{(double)i / (a.Count - 1) * 100:0.#},{15 - (v - mn) / r * 14:0.#}"));
+    }
+
+    static string Money(double? n) => n == null ? "—" : "$" + ((double)n).ToString("N2");
+    static string Sign(double v) => (v > 0 ? "+" : "") + v.ToString("0.00");
+    static string ImbColor(double v) => v > 0.05 ? "var(--grn)" : v < -0.05 ? "var(--red)" : "var(--fg)";
+    static string Dur(long s) { s = Math.Max(0, s); long h = s / 3600, m = s % 3600 / 60, x = s % 60; return (h > 0 ? h + ":" : "") + m.ToString("00") + ":" + x.ToString("00"); }
+
+    public void Dispose() { _poll?.Dispose(); _tick?.Dispose(); }
+
+    public record TapeRow(string T, string K, string D, string S, string Cls) { public string Key => T + K; }
+
+    public class St
+    {
+        public long ts { get; set; }
+        public long uptimeSec { get; set; }
+        public long cycles { get; set; }
+        public string symbol { get; set; } = "";
+        public Mkt? market { get; set; }
+        public double imbalanceL1 { get; set; }
+        public Dep? depth { get; set; }
+        public Qu? queue { get; set; }
+        public Exec? lastExec { get; set; }
+        public Tot? totals { get; set; }
+    }
+    public class Mkt { public double bid { get; set; } public double ask { get; set; } public double spread { get; set; } }
+    public class Dep { public int[] buckets { get; set; } = Array.Empty<int>(); public double[] bid { get; set; } = Array.Empty<double>(); public double[] ask { get; set; } = Array.Empty<double>(); public double[] imb { get; set; } = Array.Empty<double>(); }
+    public class Qu { public double price { get; set; } public double aheadBtc { get; set; } }
+    public class Exec { public string kind { get; set; } = ""; public string? state { get; set; } public int placeP50 { get; set; } public int placeP95 { get; set; } public int cancelP50 { get; set; } public int clockResyncs { get; set; } public string? buy { get; set; } public string? sell { get; set; } public bool flat { get; set; } public string? note { get; set; } public int code { get; set; } public string? msg { get; set; } public long at { get; set; } }
+    public class Tot { public int orders { get; set; } public int fills { get; set; } }
+}

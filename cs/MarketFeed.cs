@@ -9,7 +9,7 @@ namespace TestnetExec;
 // that tracks the market can be queried for an own order's queue position. Bootstrap is the standard
 // snapshot+diff reconciliation, simplified (no strict U/u straddle re-sync) since this is a queue demo,
 // not a production feed — labelled approx where it matters.
-public sealed class MarketFeed : IAsyncDisposable
+public sealed class MarketFeed : IFeed, IAsyncDisposable
 {
     private readonly HybridBook _book;
     private readonly HttpClient _http;
@@ -19,6 +19,7 @@ public sealed class MarketFeed : IAsyncDisposable
     private CancellationTokenSource? _cts;
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
     public bool Ready { get; private set; }
+    public string Venue => "binance";
     public Action? OnBookUpdate;   // fired after each applied diff — the reactor's producer hook
 
     public MarketFeed(HybridBook book, HttpClient http, string wsBase, string symbol)
@@ -42,7 +43,7 @@ public sealed class MarketFeed : IAsyncDisposable
 
         // 1) snapshot, 2) drop diffs older than it, 3) apply the rest, then stream live — all under one lock.
         long lastUpdateId;
-        using (var snap = JsonDocument.Parse(await _http.GetStringAsync($"/api/v3/depth?symbol={_symbol}&limit=1000")))
+        using (var snap = JsonDocument.Parse(await _http.GetStringAsync($"/api/v3/depth?symbol={_symbol}&limit=5000")))
         {
             lastUpdateId = snap.RootElement.GetProperty("lastUpdateId").GetInt64();
             lock (_sync)
@@ -91,6 +92,7 @@ public sealed class MarketFeed : IAsyncDisposable
     // Locked reads so the demo never queries a half-applied diff.
     public (int? bidTick, int? askTick) Best() { lock (_sync) return (_book.BestBidTick(), _book.BestAskTick()); }
     public long QtyAt(bool isBid, int tick) { lock (_sync) return _book.QtyAt(isBid, tick); }
+    public (long bid, long ask) DepthSum(int radiusTicks) { lock (_sync) return _book.DepthSum(radiusTicks); }
 
     public async ValueTask DisposeAsync()
     {
