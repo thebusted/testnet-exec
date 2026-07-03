@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PAPER · imbalance-momentum (Binance + Bybit)</title>
+<style>
+:root{--bg:#0a0e13;--panel:#10151c;--bd:#1f2630;--fg:#e6edf3;--mut:#8b949e;--faint:#6e7681;--grn:#3fb950;--red:#f85149;--amb:#d29922;--cyan:#39c5cf;--blue:#58a6ff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;max-width:900px;margin:0 auto;padding:24px 18px 60px;line-height:1.5}
+a{color:var(--blue);text-decoration:none}
+h1{font-size:1.25em;margin:0 0 2px}.sub{color:var(--mut);font-size:.85em;margin:0 0 4px}
+.hd{display:flex;align-items:center;gap:12px;margin:0 0 16px;color:var(--faint);font-size:.8em}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--grn);display:inline-block}.dot.stale{background:var(--amb)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.card{background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:16px 18px}
+.card .v{font-size:1.05em;font-weight:600;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center}
+.pos{font-size:.7em;padding:2px 8px;border-radius:10px;border:1px solid var(--bd);letter-spacing:.05em}
+.pos.Long{color:var(--grn);border-color:#2a4d36}.pos.Short{color:var(--red);border-color:#4d2626}.pos.Flat{color:var(--faint)}
+.row{display:flex;justify-content:space-between;font-size:.9em;padding:3px 0;border-bottom:1px dashed #171d25}
+.row .l{color:var(--mut)}.row .n{font-variant-numeric:tabular-nums}
+.big{font-size:1.9em;margin:8px 0 2px}.pnl-pos{color:var(--grn)}.pnl-neg{color:var(--red)}
+.note{margin-top:20px;color:var(--faint);font-size:.82em;background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:12px 14px}
+.foot{margin-top:20px;color:#3a424c;font-size:.78em}
+</style></head><body>
+<h1>PAPER · imbalance-momentum</h1>
+<p class="sub">Pure paper trade on live MAINNET books — no orders, marked-to-market net of fees. Measuring whether depth-weighted imbalance has edge after costs.</p>
+<div class="hd"><span class="dot" id="dot"></span><span id="state">connecting…</span><span id="up"></span><span style="margin-left:auto"><a href="/">← war room</a></span></div>
+
+<div class="grid" id="grid"></div>
+
+<div class="note" id="note">—</div>
+<div class="foot">signal: depth-weighted imbalance @ $50 · entry ±0.25 · min-hold · maker-fee assumption · 0.01 BTC/trade · <a href="https://github.com/thebusted/testnet-exec">source</a></div>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const money=n=>(n>0?'+':n<0?'-':'')+'$'+Math.abs(n).toFixed(2);
+  const cls=n=>n>0?'pnl-pos':n<0?'pnl-neg':'';
+  async function tick(){
+    try{
+      const s=await (await fetch('paper-state.json?_='+Date.now(),{cache:'no-store'})).json();
+      const live=(Date.now()-s.ts)/1000<20;
+      $('dot').className='dot'+(live?'':' stale');$('state').textContent=live?'live':'stale';
+      $('up').textContent='uptime '+Math.floor(s.uptimeSec/60)+'m '+(s.uptimeSec%60)+'s · '+s.cycles+' ticks';
+      $('grid').innerHTML=s.venues.map(v=>`
+        <div class="card">
+          <div class="v">${v.venue}<span class="pos ${v.position}">${v.position}</span></div>
+          <div class="big ${cls(v.equityPnl)}">${money(v.equityPnl)}</div>
+          <div class="faint" style="font-size:.8em;color:var(--faint);margin-bottom:8px">equity P&amp;L (realized ${money(v.realizedPnl)} + unreal ${money(v.unrealizedPnl)})</div>
+          <div class="row"><span class="l">imbalance @ $50</span><span class="n" style="color:${v.imb>0.05?'var(--grn)':v.imb<-0.05?'var(--red)':'var(--fg)'}">${(v.imb>0?'+':'')+v.imb.toFixed(2)}</span></div>
+          <div class="row"><span class="l">mid</span><span class="n">$${v.mid.toLocaleString('en-US',{minimumFractionDigits:2})}</span></div>
+          <div class="row"><span class="l">trades / wins</span><span class="n">${v.trades} / ${v.wins} (${(v.winRate*100).toFixed(0)}%)</span></div>
+          <div class="row"><span class="l">fees paid</span><span class="n" style="color:var(--red)">-$${v.fees.toFixed(2)}</span></div>
+          ${v.position!=='Flat'?`<div class="row"><span class="l">entry</span><span class="n">$${v.entry.toLocaleString('en-US',{minimumFractionDigits:2})}</span></div>`:''}
+        </div>`).join('');
+      const anyTrade=s.venues.some(v=>v.trades>0);
+      $('note').innerHTML = anyTrade
+        ? 'Honest read: this measures if the imbalance signal beats fees. Watch equity P&amp;L vs fees paid — if fees dominate, imbalance alone has no edge at this frequency and needs confirmation (e.g. liquidations / rekt).'
+        : 'Warming up — no entries yet (imbalance hasn\'t crossed ±0.25). Positions open when near-touch pressure is strong.';
+    }catch(_){ $('state').textContent='offline';$('dot').className='dot stale'; }
+    setTimeout(tick,2500);
+  }
+  tick();
+})();
+</script>
+</body></html>

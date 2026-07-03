@@ -16,7 +16,12 @@ int reps = int.TryParse(Environment.GetEnvironmentVariable("REPS"), out var r) ?
 string qty = Environment.GetEnvironmentVariable("QTY") ?? "0.00030";
 
 // paper mode is pure market data (public, no keys) — dispatch before the execution-key check.
-if ((Environment.GetEnvironmentVariable("MODE") ?? "loop") == "paper") return await PaperLoop();
+// selfcheck proves the cross-venue P&L arithmetic against hand-computed numbers, fully offline;
+// makercheck does the same for the passive/maker fill model (through-fills, leg risk, rebates).
+string earlyMode = Environment.GetEnvironmentVariable("MODE") ?? "loop";
+if (earlyMode == "selfcheck") return CrossVenueTrader.SelfCheck();
+if (earlyMode == "makercheck") return CrossMakerTrader.MakerCheck();
+if (earlyMode == "paper") return await PaperLoop();
 
 var key = Environment.GetEnvironmentVariable("BINANCE_TESTNET_KEY");
 var secret = Environment.GetEnvironmentVariable("BINANCE_TESTNET_SECRET");
@@ -98,16 +103,29 @@ async Task<int> PaperLoop()
 
     var feeds = new[] { bn, by };
     var traders = new[] { new PaperTrader("binance"), new PaperTrader("bybit") };
+    // Third book-reader: the cross-venue spread trader sees BOTH books each tick. The two single-venue
+    // traders stay untouched — they are the honest losing baseline the cross strategy is measured against.
+    var cross = new CrossVenueTrader();
+    // Fourth book-reader: the SAME spread signal executed passively (maker) — through-fill + leg-risk
+    // + rebate model, answering the taker verdict's lever #1. The taker `cross` above stays untouched
+    // as the honest baseline this variant is measured against.
+    var crossMaker = new CrossMakerTrader(verbose: true);
 
-    Console.WriteLine($"paper trade → {statePath} · imbalance-momentum, mark-to-market net of fees, Binance + Bybit mainnet");
+    Console.WriteLine($"paper trade → {statePath} · binance+bybit imbalance baseline + cross-venue spread mean-reversion (taker + maker variants), net of fees");
     long cycle = 0;
     while (true)
     {
+        var bests = new (int? bid, int? ask)[feeds.Length];
         for (int i = 0; i < feeds.Length; i++)
         {
-            var (btk, atk) = feeds[i].Best();
-            traders[i].OnTick(btk, atk, feeds[i].DepthSum(traders[i].SignalRadiusTicks));
+            bests[i] = feeds[i].Best();
+            traders[i].OnTick(bests[i].bid, bests[i].ask, feeds[i].DepthSum(traders[i].SignalRadiusTicks));
         }
+        // the cross trader's imbalance-agreement veto reuses the per-venue traders' depth imbalance
+        // (computed just above — same tick, same $50 radius)
+        cross.OnTick(bests[0].bid, bests[0].ask, bests[1].bid, bests[1].ask, traders[0].LastImb, traders[1].LastImb);
+        crossMaker.OnTick(bests[0].bid, bests[0].ask, bests[1].bid, bests[1].ask, traders[0].LastImb, traders[1].LastImb);
+
         var venues = traders.Select(t => new
         {
             venue = t.Venue,
@@ -122,11 +140,53 @@ async Task<int> PaperLoop()
             trades = t.Trades,
             wins = t.Wins,
             winRate = Math.Round(t.WinRate, 3),
+        })
+        // Cross entry: SAME anonymous shape (names/types/order) so it appends into the same array and
+        // the dashboard renders it for free. Field meanings differ for "cross" — documented, not hidden:
+        //   position = Long/Short THE SPREAD · entry = executable entry spread ($, not a price)
+        //   mid = binanceMid − bybitMid ($, not a price) · imb = z-score of that spread (not book imbalance)
+        .Append(new
+        {
+            venue = cross.Venue,
+            position = cross.Position.ToString(),
+            entry = Math.Round(cross.EntrySpread, 2),
+            imb = Math.Round(cross.LastZ, 3),
+            mid = Math.Round(cross.LastSpread, 2),
+            realizedPnl = Math.Round(cross.RealizedPnl, 4),
+            unrealizedPnl = Math.Round(cross.Unrealized, 4),
+            equityPnl = Math.Round(cross.EquityPnl, 4),
+            fees = Math.Round(cross.FeesPaid, 4),
+            trades = cross.Trades,
+            wins = cross.Wins,
+            winRate = Math.Round(cross.WinRate, 3),
+        })
+        // cross-maker: same shape once more. Field meanings mirror "cross" with two twists:
+        //   position also shows the QUOTING phase (QuoteShort → Short → ExitShort — resting orders
+        //   are first-class state in a maker model) · fees is SIGNED — maker rebates make it
+        //   NEGATIVE and the dashboard shows that truthfully.
+        .Append(new
+        {
+            venue = crossMaker.Venue,
+            position = crossMaker.State,
+            entry = Math.Round(crossMaker.EntrySpread, 2),
+            imb = Math.Round(crossMaker.LastZ, 3),
+            mid = Math.Round(crossMaker.LastSpread, 2),
+            realizedPnl = Math.Round(crossMaker.RealizedPnl, 4),
+            unrealizedPnl = Math.Round(crossMaker.Unrealized, 4),
+            equityPnl = Math.Round(crossMaker.EquityPnl, 4),
+            fees = Math.Round(crossMaker.FeesPaid, 4),
+            trades = crossMaker.Trades,
+            wins = crossMaker.Wins,
+            winRate = Math.Round(crossMaker.WinRate, 3),
         }).ToArray();
         var state = new { ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), uptimeSec = (long)up.Elapsed.TotalSeconds, cycles = cycle, symbol = SYMBOL, signalUsd = 50, venues };
         var tmp = statePath + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(state, jopts));
         File.Move(tmp, statePath, true);
+        // execution-quality heartbeat for the maker experiment — fill rate / one-leg rate / taker
+        // leakage are the numbers the maker verdict is written from, so they go to stdout each minute.
+        if (cycle % 60 == 59)
+            Console.WriteLine($"[cross-maker Σ] entries={crossMaker.Entries} pairs={crossMaker.PairFills} 1leg={crossMaker.OneLegAborts} expired={crossMaker.ExpiredQuotes} takerExit={crossMaker.TakerFallbackExits} mFills={crossMaker.MakerFills} tFills={crossMaker.TakerFills} realized={crossMaker.RealizedPnl:0.0000} fees={crossMaker.FeesPaid:0.0000} · S={crossMaker.LastSpread:0.00} z={crossMaker.LastZ:0.00} · takerCross={cross.RealizedPnl:0.0000}");
         cycle++;
         await Task.Delay(1000);   // sample the signal + mark every 1s
     }

@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EXEC · war room — BTCUSDT cross-venue monitor</title>
+<style>
+:root{--bg:#0a0e13;--panel:#10151c;--bd:#1f2630;--fg:#e6edf3;--mut:#8b949e;--faint:#6e7681;--grn:#3fb950;--red:#f85149;--amb:#d29922;--cyan:#39c5cf;--blue:#58a6ff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;max-width:1180px;margin:0 auto;padding:16px 16px 60px;line-height:1.45}
+a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
+header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;color:var(--faint)}
+.brand{font-size:16px;font-weight:700;color:var(--fg);letter-spacing:.04em}
+.sym{color:var(--mut)}
+.badge{font-size:10px;padding:2px 7px;border:1px solid var(--bd);border-radius:10px;letter-spacing:.04em}
+.wasm{font-size:10px;color:var(--faint)}
+.live{display:flex;align-items:center;gap:5px;margin-left:auto}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--grn);display:inline-block}.dot.stale{background:var(--amb)}.dot.dead{background:var(--red)}
+.kv b{color:var(--fg);font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
+.panel{background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:14px 16px;min-width:0}
+.ph{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.ph .lbl{font-size:12px;font-weight:600;letter-spacing:.02em}
+.ph .ec{font-size:11px;color:var(--faint)}
+main.stale .panel{opacity:.55;transition:opacity .3s}
+/* execution */
+.execP{grid-column:1/8}.mktP{grid-column:8/13}
+.row{display:flex;justify-content:space-between;font-size:12.5px;padding:3px 0;border-bottom:1px dashed #171d25}
+.row .l{color:var(--mut)}
+.px{display:flex;gap:14px;font-size:13px;margin-bottom:8px}.px .b{color:var(--grn)}.px .a{color:var(--red)}.px .sp{color:var(--faint);margin-left:auto}
+.ladder{margin-top:6px}
+.drow{display:grid;grid-template-columns:34px 1fr 48px;gap:8px;align-items:center;padding:2px 2px;font-size:11.5px}
+.dbar{position:relative;height:9px;background:#0d1219;border-radius:2px;overflow:hidden;display:flex}
+.dbid{background:var(--grn);opacity:.6;height:100%}.dask{background:var(--red);opacity:.6;height:100%}
+.lat{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:8px}
+.lat .t{background:var(--bg);border:1px solid var(--bd);border-radius:5px;padding:7px 9px}
+.lat .lv{font-size:16px}.lat .u{font-size:10px;color:var(--faint)}
+.sess{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px;text-align:center}
+.sess .n{font-size:22px}
+/* pnl cards */
+.pnlP{grid-column:1/13}
+.pnlrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+.pcard{background:var(--bg);border:1px solid var(--bd);border-radius:7px;padding:12px 14px}
+.pv{font-weight:600;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:13px}
+.pos{font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid var(--bd);letter-spacing:.04em}
+.pos.Long{color:var(--grn);border-color:#2a4d36}.pos.Short{color:var(--red);border-color:#4d2626}.pos.Flat{color:var(--faint)}
+.pbig{font-size:1.7em;margin:2px 0}
+.ppos{color:var(--grn)}.pneg{color:var(--red)}.pzero{color:var(--faint)}
+.psub{font-size:11px;color:var(--faint);margin-top:4px}
+.pcard.cross{border-color:#243a52}.pcard.cross-maker{border-color:#2a4d36}
+/* charts */
+.eqP{grid-column:1/8}.calP{grid-column:8/13}
+svg{display:block;width:100%;overflow:visible}
+.chartwrap{position:relative}
+.legend{display:flex;gap:14px;font-size:11px;margin-top:6px;color:var(--mut);flex-wrap:wrap}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
+/* calendar */
+.cal{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
+.cal .dow{font-size:10px;color:var(--faint);text-align:center;padding-bottom:2px}
+.cell{aspect-ratio:1;border-radius:4px;background:#0d1219;border:1px solid var(--bd);display:flex;flex-direction:column;justify-content:space-between;padding:4px 5px;font-size:10px}
+.cell .d{color:var(--faint)}.cell .p{font-size:10px;font-weight:600;text-align:right}
+.cell.today{outline:1px solid var(--blue);outline-offset:-1px}
+.cell.empty{opacity:.35}
+.note{margin-top:16px;color:var(--faint);font-size:12px;background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:12px 14px}
+.foot{margin-top:16px;color:#3a424c;font-size:11px}
+@media(max-width:820px){.grid{grid-template-columns:1fr}.execP,.mktP,.pnlP,.eqP,.calP{grid-column:auto}}
+</style></head><body>
+
+<header>
+  <span class="brand">EXEC</span><span class="sym" id="sym">· BTCUSDT</span>
+  <span class="badge" style="border-color:var(--blue);color:var(--blue)">MAINNET MKT</span>
+  <span class="badge">TESTNET EXEC</span>
+  <span class="wasm">single-file monitor</span>
+  <span class="live"><span class="dot" id="dot"></span><span id="livestate">connecting…</span>
+    <span class="kv" id="up"></span></span>
+</header>
+
+<main id="main">
+<div class="grid">
+
+  <section class="panel execP">
+    <div class="ph"><span class="lbl">execution console · testnet</span>
+      <span class="ec" id="execmeta">—</span></div>
+    <div class="lat" id="lat"></div>
+    <div class="subline" style="font-size:11px;color:var(--faint);margin-top:8px" id="execsub">place→cancel + real fill→flatten · keys never leave the VPS</div>
+    <div class="sess" id="sess"></div>
+  </section>
+
+  <section class="panel mktP">
+    <div class="ph"><span class="lbl">market · depth-weighted imbalance</span></div>
+    <div class="px" id="px"></div>
+    <div class="ladder" id="ladder"></div>
+  </section>
+
+  <section class="panel pnlP">
+    <div class="ph"><span class="lbl">paper trade · cross-venue P&amp;L</span>
+      <span class="ec" id="pnlmeta">mainnet marks · net of fees</span></div>
+    <div class="pnlrow" id="pnlrow"><div class="psub">waiting for paper-state…</div></div>
+  </section>
+
+  <section class="panel eqP">
+    <div class="ph"><span class="lbl">equity curve · this session</span>
+      <span class="ec">live-accumulated, per strategy</span></div>
+    <div class="chartwrap"><svg id="eqchart" viewBox="0 0 100 40" preserveAspectRatio="none" height="150"></svg></div>
+    <div class="legend" id="eqlegend"></div>
+  </section>
+
+  <section class="panel calP">
+    <div class="ph"><span class="lbl">daily P&amp;L calendar</span>
+      <span class="ec" id="calmeta">portfolio equity</span></div>
+    <div class="cal" id="cal"></div>
+  </section>
+
+</div>
+<div class="note" id="note">Pure paper trade on live MAINNET books (Binance + Bybit), marked-to-market net of fees. No orders on the market side. Equity curve + calendar accumulate from real ticks as the monitor runs — no seeded data.</div>
+<div class="foot">single-file war room · <a href="https://github.com/thebusted/testnet-exec">source</a></div>
+</main>
+
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+// ponytail: history is accumulated client-side in localStorage — real ticks only, starts sparse and fills as it runs.
+// upgrade path: a server-side daily-equity JSONL would survive cache clears and back-fill across devices.
+const LS_EQ='exec_eq_v1', LS_CAL='exec_cal_v1';
+const eqHist=JSON.parse(localStorage.getItem(LS_EQ)||'{}');   // {venue:[{t,eq}]}
+const calHist=JSON.parse(localStorage.getItem(LS_CAL)||'{}'); // {YYYY-MM-DD:{eq, lastTs}}
+const COLORS={binance:'#f0b90b',bybit:'#f7a600',cross:'#58a6ff','cross-maker':'#3fb950'};
+const money=n=>(n>0?'+':n<0?'-':'')+'$'+Math.abs(n).toFixed(2);
+const cls=n=>n>0?'ppos':n<0?'pneg':'pzero';
+const num=(n,d=2)=>Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+const LBL=['$50','$100','$200','$400','$1K','$2K','$6K','$10K','$20K'];
+
+function pushEq(venue,t,eq){
+  const a=eqHist[venue]||(eqHist[venue]=[]);
+  if(a.length && t-a[a.length-1].t<900) return; // ~1 point/sec max
+  a.push({t,eq}); if(a.length>3600) a.shift();
+}
+function saveHist(){ localStorage.setItem(LS_EQ,JSON.stringify(eqHist)); localStorage.setItem(LS_CAL,JSON.stringify(calHist)); }
+
+function renderExec(s){
+  $('sym').textContent='· '+(s.symbol||'BTCUSDT');
+  $('execmeta').textContent=`-1021 resyncs ${s.lastExec?.clockResyncs??0} · -2011 handled ✓`;
+  const le=s.lastExec||{};
+  $('lat').innerHTML=[['place p50',le.placeP50],['place p95',le.placeP95],['cancel p50',le.cancelP50]]
+    .map(([l,v])=>`<div class="t"><div class="l" style="font-size:10px;color:var(--mut)">${l}</div><div class="lv">${v??'—'}<span class="u"> ms</span></div></div>`).join('');
+  $('sess').innerHTML=[['orders',s.totals?.orders??0],['fills',s.totals?.fills??0,'var(--grn)'],['cycles',s.cycles??0]]
+    .map(([l,v,c])=>`<div><div class="l" style="font-size:10px;color:var(--mut)">${l}</div><div class="n" ${c?`style="color:${c}"`:''}>${v}</div></div>`).join('');
+  const m=s.market||{};
+  $('px').innerHTML=`<span class="b">$${num(m.bid||0)}</span><span class="a">$${num(m.ask||0)}</span><span class="sp">spread $${num(m.spread||0)}</span>`;
+  const d=s.depth;
+  if(d&&d.imb){
+    const scale=Math.max(1e-9,Math.max(...d.bid,...d.ask));
+    $('ladder').innerHTML=d.imb.map((v,i)=>{
+      const col=v>0.05?'var(--grn)':v<-0.05?'var(--red)':'var(--fg)';
+      return `<div class="drow"><span style="color:var(--mut)">${LBL[i]||''}</span>
+        <div class="dbar"><div class="dbid" style="width:${(d.bid[i]/scale*50).toFixed(1)}%"></div><div class="dask" style="width:${(d.ask[i]/scale*50).toFixed(1)}%"></div></div>
+        <span style="color:${col};text-align:right">${(v>0?'+':'')+v.toFixed(2)}</span></div>`;
+    }).join('');
+  }
+}
+
+function renderPnl(p){
+  const vs=p.venues||[];
+  $('pnlmeta').textContent=`mainnet marks · net of fees · ${vs.length} strategies`;
+  $('pnlrow').innerHTML=vs.map(v=>{
+    const isX=v.venue==='cross'||v.venue==='cross-maker';
+    const sub=isX?`spread $${num(v.mid)} · z ${(v.imb>0?'+':'')+v.imb.toFixed(2)}`
+                 :`imb ${(v.imb>0?'+':'')+v.imb.toFixed(2)} · mid $${num(v.mid,0)}`;
+    const feeTxt=v.fees<0?`rebate ${money(-v.fees)}`:`fees ${money(-Math.abs(v.fees))}`;
+    return `<div class="pcard ${v.venue}">
+      <div class="pv">${v.venue}<span class="pos ${v.position}">${v.position}</span></div>
+      <div class="pbig ${cls(v.equityPnl)}">${money(v.equityPnl)}</div>
+      <div class="psub">realized ${money(v.realizedPnl)} · ${v.trades} trades · ${(v.winRate*100).toFixed(0)}% win</div>
+      <div class="psub">${feeTxt} · ${sub}</div></div>`;
+  }).join('');
+  // accumulate equity + calendar from real marks
+  const t=p.ts||Date.now();
+  let port=0; vs.forEach(v=>{ pushEq(v.venue,t,v.equityPnl); port+=v.equityPnl; });
+  const day=new Date(t).toISOString().slice(0,10);
+  calHist[day]={eq:port,lastTs:t};
+  saveHist();
+  renderEq(); renderCal();
+}
+
+function renderEq(){
+  const venues=Object.keys(eqHist).filter(v=>eqHist[v].length>1);
+  const svg=$('eqchart'); const W=100,H=40;
+  if(!venues.length){ svg.innerHTML=`<text x="50" y="20" fill="#3a424c" font-size="4" text-anchor="middle">accumulating…</text>`; $('eqlegend').innerHTML=''; return; }
+  let tmin=Infinity,tmax=-Infinity,vmin=0,vmax=0;
+  venues.forEach(v=>eqHist[v].forEach(p=>{tmin=Math.min(tmin,p.t);tmax=Math.max(tmax,p.t);vmin=Math.min(vmin,p.eq);vmax=Math.max(vmax,p.eq);}));
+  const pad=(vmax-vmin)*0.1||1; vmin-=pad; vmax+=pad; const tr=tmax-tmin||1,vr=vmax-vmin||1;
+  const x=t=>(t-tmin)/tr*W, y=v=>H-(v-vmin)/vr*H;
+  const zero=y(0);
+  let out=`<line x1="0" y1="${zero.toFixed(1)}" x2="${W}" y2="${zero.toFixed(1)}" stroke="#1f2630" stroke-width=".3" stroke-dasharray="1 1"/>`;
+  venues.forEach(v=>{
+    const pts=eqHist[v].map(p=>`${x(p.t).toFixed(2)},${y(p.eq).toFixed(2)}`).join(' ');
+    out+=`<polyline points="${pts}" fill="none" stroke="${COLORS[v]||'#8b949e'}" stroke-width=".7" vector-effect="non-scaling-stroke"/>`;
+  });
+  svg.innerHTML=out;
+  $('eqlegend').innerHTML=venues.map(v=>{const last=eqHist[v][eqHist[v].length-1].eq;return `<span><i style="background:${COLORS[v]||'#8b949e'}"></i>${v} ${money(last)}</span>`;}).join('');
+}
+
+function renderCal(){
+  const now=new Date(); const y=now.getUTCFullYear(),m=now.getUTCMonth();
+  const first=new Date(Date.UTC(y,m,1)); const startDow=first.getUTCDay();
+  const days=new Date(Date.UTC(y,m+1,0)).getUTCDate();
+  const today=now.toISOString().slice(0,10);
+  // daily PnL = equity delta vs previous day's last equity
+  const dates=Object.keys(calHist).sort();
+  const dayPnl={}; let prev=0;
+  dates.forEach(d=>{ dayPnl[d]=calHist[d].eq-prev; prev=calHist[d].eq; });
+  const dows=['S','M','T','W','T','F','S'].map(d=>`<div class="dow">${d}</div>`).join('');
+  let cells='';
+  for(let i=0;i<startDow;i++) cells+=`<div class="cell empty"></div>`;
+  for(let d=1;d<=days;d++){
+    const ds=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const has=ds in calHist; const pnl=dayPnl[ds];
+    const bg=!has?'':pnl>0?'rgba(63,185,80,.18)':pnl<0?'rgba(248,81,73,.18)':'';
+    const col=!has?'var(--faint)':pnl>0?'var(--grn)':pnl<0?'var(--red)':'var(--faint)';
+    cells+=`<div class="cell ${ds===today?'today':''} ${has?'':'empty'}" style="${bg?`background:${bg}`:''}">
+      <span class="d">${d}</span><span class="p" style="color:${col}">${has?money(pnl).replace('$',''):''}</span></div>`;
+  }
+  $('cal').innerHTML=dows+cells;
+  $('calmeta').textContent=now.toLocaleString('en-US',{month:'short',year:'numeric',timeZone:'UTC'})+' · UTC';
+}
+
+let lastTs=0;
+async function poll(){
+  try{
+    const s=await(await fetch('state.json?_='+Date.now(),{cache:'no-store'})).json();
+    lastTs=Math.max(lastTs,s.ts); renderExec(s);
+  }catch(_){}
+  try{
+    const p=await(await fetch('paper-state.json?_='+Date.now(),{cache:'no-store'})).json();
+    lastTs=Math.max(lastTs,p.ts); renderPnl(p);
+    $('up').innerHTML='up <b>'+Math.floor(p.uptimeSec/60)+'m</b> · <b>'+p.cycles+'</b> ticks';
+  }catch(_){}
+  const age=(Date.now()-lastTs)/1000;
+  $('dot').className='dot'+(lastTs===0?' dead':age>45?' dead':age>15?' stale':'');
+  $('livestate').textContent=lastTs===0?'offline':age>45?'DISCONNECTED':age>15?'STALE':'LIVE';
+  $('main').className=age>45?'stale':'';
+  setTimeout(poll,2500);
+}
+renderCal(); renderEq(); poll();
+})();
+</script>
+</body></html>
