@@ -17,10 +17,12 @@ string qty = Environment.GetEnvironmentVariable("QTY") ?? "0.00030";
 
 // paper mode is pure market data (public, no keys) — dispatch before the execution-key check.
 // selfcheck proves the cross-venue P&L arithmetic against hand-computed numbers, fully offline;
-// makercheck does the same for the passive/maker fill model (through-fills, leg risk, rebates).
+// makercheck does the same for the passive/maker fill model (through-fills, leg risk, rebates);
+// fundingcheck does the same for the perp funding-carry model (settlement cash, fees, basis, slip).
 string earlyMode = Environment.GetEnvironmentVariable("MODE") ?? "loop";
 if (earlyMode == "selfcheck") return CrossVenueTrader.SelfCheck();
 if (earlyMode == "makercheck") return CrossMakerTrader.MakerCheck();
+if (earlyMode == "fundingcheck") return FundingArbTrader.FundingCheck();
 if (earlyMode == "paper") return await PaperLoop();
 
 var key = Environment.GetEnvironmentVariable("BINANCE_TESTNET_KEY");
@@ -110,8 +112,15 @@ async Task<int> PaperLoop()
     // + rebate model, answering the taker verdict's lever #1. The taker `cross` above stays untouched
     // as the honest baseline this variant is measured against.
     var crossMaker = new CrossMakerTrader(verbose: true);
+    // Fifth entry: delta-neutral PERP funding-rate carry between Binance and Bybit BTCUSDT perps.
+    // Different data plane from the four above — public REST funding polls (30s) instead of spot book
+    // ticks; the FundingFeed swaps immutable snapshots and the trader mutates only on THIS loop's
+    // thread via TryTake, same single-threaded-strategy discipline as the book feeds.
+    var funding = new FundingArbTrader();
+    var fundingFeed = new FundingFeed(SYMBOL);
+    fundingFeed.Start();
 
-    Console.WriteLine($"paper trade → {statePath} · binance+bybit imbalance baseline + cross-venue spread mean-reversion (taker + maker variants), net of fees");
+    Console.WriteLine($"paper trade → {statePath} · binance+bybit imbalance baseline + cross-venue spread mean-reversion (taker + maker variants) + perp funding-rate carry, net of fees");
     long cycle = 0;
     while (true)
     {
@@ -125,6 +134,9 @@ async Task<int> PaperLoop()
         // (computed just above — same tick, same $50 radius)
         cross.OnTick(bests[0].bid, bests[0].ask, bests[1].bid, bests[1].ask, traders[0].LastImb, traders[1].LastImb);
         crossMaker.OnTick(bests[0].bid, bests[0].ask, bests[1].bid, bests[1].ask, traders[0].LastImb, traders[1].LastImb);
+        // funding data changes on poll cadence (30s), not tick cadence — feed the trader each NEW
+        // snapshot exactly once, on this thread.
+        if (fundingFeed.TryTake(out var fSnap)) funding.OnSample(fSnap);
 
         var venues = traders.Select(t => new
         {
@@ -178,6 +190,28 @@ async Task<int> PaperLoop()
             trades = crossMaker.Trades,
             wins = crossMaker.Wins,
             winRate = Math.Round(crossMaker.WinRate, 3),
+        })
+        // funding: same shape a fifth time. Field meanings for a CARRY trade, documented not hidden:
+        //   position = which venue each leg is on (LongBnShortBy = long binance perp / short bybit perp)
+        //   mid = current funding differential byRate−bnRate in bps PER 8h (not a price)
+        //   imb = annualized gross carry % (|d|·1095 when flat; signed for our side when held)
+        //   entry = the differential (bps/8h) captured at entry · fees = all taker fills paid
+        //   realizedPnl includes funding cash settled at boundaries — funding pays into the wallet at
+        //   settlement, so it IS realized; unrealizedPnl = basis drift − exit fees owed to close now.
+        .Append(new
+        {
+            venue = funding.Venue,
+            position = funding.Position.ToString(),
+            entry = Math.Round(funding.EntryDiffBps, 4),
+            imb = Math.Round(funding.AnnualizedCarryPct, 3),
+            mid = Math.Round(funding.LastDiffBps, 4),
+            realizedPnl = Math.Round(funding.RealizedPnl, 4),
+            unrealizedPnl = Math.Round(funding.Unrealized, 4),
+            equityPnl = Math.Round(funding.EquityPnl, 4),
+            fees = Math.Round(funding.FeesPaid, 4),
+            trades = funding.Trades,
+            wins = funding.Wins,
+            winRate = Math.Round(funding.WinRate, 3),
         }).ToArray();
         var state = new { ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), uptimeSec = (long)up.Elapsed.TotalSeconds, cycles = cycle, symbol = SYMBOL, signalUsd = 50, venues };
         var tmp = statePath + ".tmp";
@@ -186,7 +220,12 @@ async Task<int> PaperLoop()
         // execution-quality heartbeat for the maker experiment — fill rate / one-leg rate / taker
         // leakage are the numbers the maker verdict is written from, so they go to stdout each minute.
         if (cycle % 60 == 59)
+        {
             Console.WriteLine($"[cross-maker Σ] entries={crossMaker.Entries} pairs={crossMaker.PairFills} 1leg={crossMaker.OneLegAborts} expired={crossMaker.ExpiredQuotes} takerExit={crossMaker.TakerFallbackExits} mFills={crossMaker.MakerFills} tFills={crossMaker.TakerFills} realized={crossMaker.RealizedPnl:0.0000} fees={crossMaker.FeesPaid:0.0000} · S={crossMaker.LastSpread:0.00} z={crossMaker.LastZ:0.00} · takerCross={cross.RealizedPnl:0.0000}");
+            // funding heartbeat: the live differential vs the priced entry threshold — the whole
+            // strategy verdict is readable from this one line (flat + d≪threshold = honest "no trade").
+            Console.WriteLine($"[funding Σ] d={funding.LastDiffBps:0.000}bp/8h ann={funding.AnnualizedCarryPct:0.00}% thresh={funding.EntryThresholdBps:0.00}bp pos={funding.Position} legSettles={funding.LegSettles} realized={funding.RealizedPnl:0.0000} fees={funding.FeesPaid:0.0000} · polls={fundingFeed.Polls} errs={fundingFeed.Errors}");
+        }
         cycle++;
         await Task.Delay(1000);   // sample the signal + mark every 1s
     }
