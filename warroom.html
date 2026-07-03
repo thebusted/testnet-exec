@@ -165,7 +165,8 @@ function renderPnl(p){
   $('pnlmeta').textContent=`mainnet marks · net of fees · ${vs.length} strategies`;
   $('pnlrow').innerHTML=vs.map(v=>{
     const isX=v.venue==='cross'||v.venue==='cross-maker';
-    const sub=isX?`spread $${num(v.mid)} · z ${(v.imb>0?'+':'')+v.imb.toFixed(2)}`
+    const sub=v.venue==='funding'?`carry ${(v.imb>0?'+':'')+v.imb.toFixed(2)}%/yr · spread ${v.mid.toFixed(2)} bps`
+             :isX?`spread $${num(v.mid)} · z ${(v.imb>0?'+':'')+v.imb.toFixed(2)}`
                  :`imb ${(v.imb>0?'+':'')+v.imb.toFixed(2)} · mid $${num(v.mid,0)}`;
     const feeTxt=v.fees<0?`rebate ${money(-v.fees)}`:`fees ${money(-Math.abs(v.fees))}`;
     return `<div class="pcard ${v.venue}">
