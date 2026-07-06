@@ -51,6 +51,8 @@ main.stale .panel{opacity:.55;transition:opacity .3s}
 /* charts */
 .eqP{grid-column:1/8}.calP{grid-column:8/13}
 .chartP{grid-column:1/8}.latticeP{grid-column:8/13}
+.ridgeP{grid-column:1/13}
+#ridge{width:100%;height:340px;display:block;background:var(--bg);border-radius:6px}
 .tvwrap{height:300px;border-radius:6px;overflow:hidden;background:var(--bg)}
 #lattice{width:100%;height:300px;display:block;border-radius:6px;background:var(--bg)}
 #latStrat{background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:5px;font:11px ui-monospace,monospace;padding:2px 6px;cursor:pointer}
@@ -69,7 +71,7 @@ svg{display:block;width:100%;overflow:visible}
 .cell.empty{opacity:.35}
 .note{margin-top:16px;color:var(--faint);font-size:12px;background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:12px 14px}
 .foot{margin-top:16px;color:#3a424c;font-size:11px}
-@media(max-width:820px){.grid{grid-template-columns:1fr}.execP,.mktP,.pnlP,.eqP,.calP,.chartP,.latticeP{grid-column:auto}}
+@media(max-width:820px){.grid{grid-template-columns:1fr}.execP,.mktP,.pnlP,.eqP,.calP,.chartP,.latticeP,.ridgeP{grid-column:auto}}
 </style></head><body>
 
 <header>
@@ -121,6 +123,12 @@ svg{display:block;width:100%;overflow:visible}
       <span class="ec"><select id="latStrat"></select></span></div>
     <canvas id="lattice"></canvas>
     <div style="font-size:11px;color:var(--faint);margin-top:6px">balls fall through pegs · green side = win · dashed line = real win rate from paper-state</div>
+  </section>
+
+  <section class="panel ridgeP">
+    <div class="ph"><span class="lbl">depth-imbalance ridge · order-book pressure over time</span>
+      <span class="ec">$50→$20K buckets · green bid-heavy / red ask-heavy · live from state.json</span></div>
+    <canvas id="ridge"></canvas>
   </section>
 
   <section class="panel eqP">
@@ -180,6 +188,7 @@ function renderExec(s){
         <div class="dbar"><div class="dbid" style="width:${(d.bid[i]/scale*50).toFixed(1)}%"></div><div class="dask" style="width:${(d.ask[i]/scale*50).toFixed(1)}%"></div></div>
         <span style="color:${col};text-align:right">${(v>0?'+':'')+v.toFixed(2)}</span></div>`;
     }).join('');
+    pushRidge(d.imb); initRidge();
   }
 }
 
@@ -563,6 +572,192 @@ function initLattice(vs){
   if(!_galton) _latStart();
 }
 window.addEventListener('resize',function(){var cv=$('lattice');if(cv&&_galton){cv.width=cv.clientWidth;cv.height=cv.clientHeight;}});
+
+// ---- Tail Ridge: 3D order-book depth-imbalance landscape (real depth.imb over time) ----
+function tailRidge(canvasEl, opts) {
+  opts = opts || {};
+  var rowLabels = opts.rowLabels || [];
+  var colLabels = opts.colLabels || [];
+  var bg        = opts.bg        || '#0a0e13';
+  var textColor = opts.textColor || '#e6edf3';
+  var posColor  = opts.posColor  || '#3fb950';
+  var negColor  = opts.negColor  || '#f85149';
+  var ctx = canvasEl.getContext('2d');
+  var W = 0, H = 0, pcx = 0, pcy = 0, pscale = 1;
+  var YAW = -0.58, PITCH = 0.62, DIST = 3.15, FOV = 2.15;
+  var DEPTH_SPREAD = 2.15;
+  var Y_SCALE = 0.85;
+  function parseHex(str) {
+    if (!str || str[0] !== '#') return [255, 255, 255];
+    var h = str.slice(1);
+    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+    if (h.length < 6) return [255, 255, 255];
+    return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+  }
+  function mix(a, b, t) { return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+  function rgba(c, a) { return 'rgba(' + (c[0]|0) + ',' + (c[1]|0) + ',' + (c[2]|0) + ',' + a + ')'; }
+  var bgRGB = parseHex(bg), textRGB = parseHex(textColor);
+  var posRGB = parseHex(posColor), negRGB = parseHex(negColor);
+  function project(wx, wy, wz) {
+    var z = (wz - 0.5) * DEPTH_SPREAD;
+    var cy = Math.cos(YAW), sy = Math.sin(YAW);
+    var rx = wx*cy - z*sy, rz = wx*sy + z*cy;
+    var cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+    var ry = wy*sp - rz*cp, depth = wy*cp + rz*sp;
+    var denom = DIST - depth; if (denom < 0.45) denom = 0.45;
+    var f = FOV / denom;
+    return { x: pcx + rx*f*pscale, y: pcy - ry*f*pscale, s: f };
+  }
+  function setViewport() {
+    pcx = W * 0.5;
+    pcy = H * 0.56;
+    pscale = Math.min(W * 0.62, H * 1.15);
+  }
+  var current = null, target = null;
+  var LERP = 0.16;
+  function toRows(grid) {
+    return (grid || []).map(function (row) {
+      var out = new Float32Array(row.length);
+      for (var i = 0; i < row.length; i++) {
+        var v = row[i]; if (v == null || isNaN(v)) v = 0;
+        out[i] = v < -1 ? -1 : (v > 1 ? 1 : v);
+      }
+      return out;
+    });
+  }
+  function setGrid(grid) {
+    target = toRows(grid);
+    var sameShape = current && current.length === target.length &&
+      (target.length === 0 || (current[0] && current[0].length === target[0].length));
+    if (!sameShape) current = target.map(function (r) { return r.slice(); });
+  }
+  setGrid(opts.grid);
+  function drawRow(rIdx, rows, cols) {
+    var vals = current[rIdx];
+    var wz = rows > 1 ? rIdx / (rows - 1) : 0;
+    var depthT = wz;
+    var pts = new Array(cols), floors = new Array(cols);
+    for (var c = 0; c < cols; c++) {
+      var u = cols > 1 ? c / (cols - 1) : 0.5;
+      var wx = (u - 0.5) * 2.0;
+      pts[c] = project(wx, vals[c] * Y_SCALE, wz);
+      floors[c] = project(wx, 0, wz);
+    }
+    for (var c1 = 0; c1 < cols - 1; c1++) {
+      var vAvg = (vals[c1] + vals[c1+1]) / 2;
+      var tint = vAvg >= 0 ? posRGB : negRGB;
+      var mag = Math.min(1, Math.abs(vAvg));
+      var fill = mix(mix(bgRGB, tint, 0.22 + 0.55*mag), bgRGB, 0.45*depthT);
+      var fillA = (0.32 + 0.5*mag) * (1 - 0.55*depthT);
+      ctx.beginPath();
+      ctx.moveTo(floors[c1].x, floors[c1].y);
+      ctx.lineTo(pts[c1].x, pts[c1].y);
+      ctx.lineTo(pts[c1+1].x, pts[c1+1].y);
+      ctx.lineTo(floors[c1+1].x, floors[c1+1].y);
+      ctx.closePath();
+      ctx.fillStyle = rgba(fill, fillA);
+      ctx.fill();
+    }
+    for (var c2 = 0; c2 < cols - 1; c2++) {
+      var vAvg2 = (vals[c2] + vals[c2+1]) / 2;
+      var tint2 = vAvg2 >= 0 ? posRGB : negRGB;
+      var strokeRGB = mix(mix(tint2, textRGB, 0.2), bgRGB, 0.5*depthT);
+      ctx.beginPath();
+      ctx.moveTo(pts[c2].x, pts[c2].y);
+      ctx.lineTo(pts[c2+1].x, pts[c2+1].y);
+      ctx.lineWidth = (rIdx === 0 ? 1.6 : 1.0) * (0.8 + 0.5*pts[c2].s);
+      ctx.strokeStyle = rgba(strokeRGB, 0.95 - 0.55*depthT);
+      ctx.stroke();
+    }
+    return { pts: pts, floors: floors };
+  }
+  function drawDepthGrid(rows) {
+    if (rows < 2) return;
+    var us = [0, 0.5, 1];
+    ctx.save();
+    ctx.setLineDash([3, 4]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = rgba(textRGB, 0.12);
+    for (var i = 0; i < us.length; i++) {
+      var wx = (us[i] - 0.5) * 2;
+      var front = project(wx, 0, 0), back = project(wx, 0, 1);
+      ctx.beginPath(); ctx.moveTo(front.x, front.y); ctx.lineTo(back.x, back.y); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function drawAxisLabels(rows, cols, frontFloors) {
+    ctx.font = '11px ui-monospace, Menlo, Consolas, monospace';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = rgba(textRGB, 0.55);
+    if (colLabels.length && frontFloors) {
+      ctx.textAlign = 'center';
+      for (var c = 0; c < Math.min(cols, colLabels.length); c++) {
+        ctx.fillText(String(colLabels[c]), frontFloors[c].x, frontFloors[c].y + 14);
+      }
+    }
+    if (rowLabels.length && rows > 0) {
+      ctx.textAlign = 'right';
+      var step = Math.max(1, Math.ceil(rows / 6));
+      for (var r = 0; r < rows; r += step) {
+        if (r >= rowLabels.length) continue;
+        var wz = rows > 1 ? r / (rows - 1) : 0;
+        var p = project(-1, 0, wz);
+        ctx.fillText(String(rowLabels[r]), Math.max(30, p.x - 6), p.y + 3);
+      }
+    }
+  }
+  var raf = null, running = true;
+  function frame() {
+    if (!running) return;
+    var w = canvasEl.width, h = canvasEl.height;
+    if (w !== W || h !== H) { W = w; H = h; setViewport(); }
+    if (current && target) {
+      for (var r = 0; r < current.length; r++) {
+        var cr = current[r], tr = target[r];
+        for (var c = 0; c < cr.length; c++) cr[c] += (tr[c] - cr[c]) * LERP;
+      }
+    }
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+    var rows2 = current ? current.length : 0;
+    var cols2 = rows2 ? current[0].length : 0;
+    if (rows2 && cols2) {
+      drawDepthGrid(rows2);
+      var frontFloors = null;
+      for (var ri = rows2 - 1; ri >= 0; ri--) {
+        var res = drawRow(ri, rows2, cols2);
+        if (ri === 0) frontFloors = res.floors;
+      }
+      drawAxisLabels(rows2, cols2, frontFloors);
+    }
+    raf = requestAnimationFrame(frame);
+  }
+  raf = requestAnimationFrame(frame);
+  return {
+    stop: function () { running = false; if (raf) cancelAnimationFrame(raf); },
+    update: function (grid) { setGrid(grid); }
+  };
+}
+// ---- ridge control: accumulate real depth.imb history, init/update ----
+var LS_RIDGE='exec_ridge_v1';
+var ridgeHist=JSON.parse(localStorage.getItem(LS_RIDGE)||'[]');
+var _ridge=null;
+function pushRidge(imb){
+  if(!imb||!imb.length) return;
+  ridgeHist.push(imb.slice());
+  if(ridgeHist.length>24) ridgeHist.shift();
+  localStorage.setItem(LS_RIDGE,JSON.stringify(ridgeHist));
+}
+function ridgeGrid(){ return ridgeHist.slice().reverse(); }
+function initRidge(){
+  var cv=$('ridge'); if(!cv) return;
+  if(!_ridge){
+    cv.width=cv.clientWidth||640; cv.height=cv.clientHeight||340;
+    _ridge=tailRidge(cv,{grid:ridgeGrid(),rowLabels:[],colLabels:['$50','$100','$200','$400','$1K','$2K','$6K','$10K','$20K'],posColor:'#3fb950',negColor:'#f85149',bg:'#0a0e13',textColor:'#e6edf3'});
+  } else { _ridge.update(ridgeGrid()); }
+}
+window.addEventListener('resize',function(){var cv=$('ridge');if(cv&&_ridge){cv.width=cv.clientWidth;cv.height=cv.clientHeight;}});
 
 let lastTs=0;
 async function poll(){
