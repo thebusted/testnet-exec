@@ -50,20 +50,26 @@ main.stale .panel{opacity:.55;transition:opacity .3s}
 .pcard.cross{border-color:#243a52}.pcard.cross-maker{border-color:#2a4d36}
 /* charts */
 .eqP{grid-column:1/8}.calP{grid-column:8/13}
+.chartP{grid-column:1/8}.latticeP{grid-column:8/13}
+.tvwrap{height:300px;border-radius:6px;overflow:hidden;background:var(--bg)}
+#lattice{width:100%;height:300px;display:block;border-radius:6px;background:var(--bg)}
+#latStrat{background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:5px;font:11px ui-monospace,monospace;padding:2px 6px;cursor:pointer}
 svg{display:block;width:100%;overflow:visible}
-.chartwrap{position:relative}
+.chartwrap{position:relative;min-height:150px}
+.eqempty{position:absolute;inset:0;display:none;align-items:center;justify-content:center;color:#3a424c;font-size:12px;letter-spacing:.1em;pointer-events:none}
+.chartwrap.noeq .eqempty{display:flex}
 .legend{display:flex;gap:14px;font-size:11px;margin-top:6px;color:var(--mut);flex-wrap:wrap}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
 /* calendar */
 .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
 .cal .dow{font-size:10px;color:var(--faint);text-align:center;padding-bottom:2px}
-.cell{aspect-ratio:1;border-radius:4px;background:#0d1219;border:1px solid var(--bd);display:flex;flex-direction:column;justify-content:space-between;padding:4px 5px;font-size:10px}
+.cell{min-height:34px;border-radius:4px;background:#0d1219;border:1px solid var(--bd);display:flex;flex-direction:column;justify-content:space-between;padding:4px 5px;font-size:10px}
 .cell .d{color:var(--faint)}.cell .p{font-size:10px;font-weight:600;text-align:right}
 .cell.today{outline:1px solid var(--blue);outline-offset:-1px}
 .cell.empty{opacity:.35}
 .note{margin-top:16px;color:var(--faint);font-size:12px;background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:12px 14px}
 .foot{margin-top:16px;color:#3a424c;font-size:11px}
-@media(max-width:820px){.grid{grid-template-columns:1fr}.execP,.mktP,.pnlP,.eqP,.calP{grid-column:auto}}
+@media(max-width:820px){.grid{grid-template-columns:1fr}.execP,.mktP,.pnlP,.eqP,.calP,.chartP,.latticeP{grid-column:auto}}
 </style></head><body>
 
 <header>
@@ -100,10 +106,27 @@ svg{display:block;width:100%;overflow:visible}
     <div class="pnlrow" id="pnlrow"><div class="psub">waiting for paper-state…</div></div>
   </section>
 
+  <section class="panel chartP">
+    <div class="ph"><span class="lbl">price · BTCUSDT candles</span>
+      <span class="ec">TradingView · Binance · real-time</span></div>
+    <div class="tvwrap"><div class="tradingview-widget-container" style="height:100%;width:100%">
+      <div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+      {"autosize":true,"symbol":"BINANCE:BTCUSDT","interval":"60","timezone":"Etc/UTC","theme":"dark","style":"1","locale":"en","hide_top_toolbar":false,"allow_symbol_change":false,"save_image":false,"calendar":false,"support_host":"https://www.tradingview.com"}
+      </script></div></div>
+  </section>
+
+  <section class="panel latticeP">
+    <div class="ph"><span class="lbl">win/loss lattice · Galton</span>
+      <span class="ec"><select id="latStrat"></select></span></div>
+    <canvas id="lattice"></canvas>
+    <div style="font-size:11px;color:var(--faint);margin-top:6px">balls fall through pegs · green side = win · dashed line = real win rate from paper-state</div>
+  </section>
+
   <section class="panel eqP">
     <div class="ph"><span class="lbl">equity curve · this session</span>
       <span class="ec">live-accumulated, per strategy</span></div>
-    <div class="chartwrap"><svg id="eqchart" viewBox="0 0 100 40" preserveAspectRatio="none" height="150"></svg></div>
+    <div class="chartwrap"><svg id="eqchart" viewBox="0 0 100 40" preserveAspectRatio="none" height="150"></svg><div class="eqempty">accumulating…</div></div>
     <div class="legend" id="eqlegend"></div>
   </section>
 
@@ -181,13 +204,14 @@ function renderPnl(p){
   const day=new Date(t).toISOString().slice(0,10);
   calHist[day]={eq:port,lastTs:t};
   saveHist();
-  renderEq(); renderCal();
+  renderEq(); renderCal(); initLattice(vs);
 }
 
 function renderEq(){
   const venues=Object.keys(eqHist).filter(v=>eqHist[v].length>1);
   const svg=$('eqchart'); const W=100,H=40;
-  if(!venues.length){ svg.innerHTML=`<text x="50" y="20" fill="#3a424c" font-size="4" text-anchor="middle">accumulating…</text>`; $('eqlegend').innerHTML=''; return; }
+  if(!venues.length){ svg.innerHTML=''; svg.parentNode.classList.add('noeq'); $('eqlegend').innerHTML=''; return; }
+  svg.parentNode.classList.remove('noeq');
   let tmin=Infinity,tmax=-Infinity,vmin=0,vmax=0;
   venues.forEach(v=>eqHist[v].forEach(p=>{tmin=Math.min(tmin,p.t);tmax=Math.max(tmax,p.t);vmin=Math.min(vmin,p.eq);vmax=Math.max(vmax,p.eq);}));
   const pad=(vmax-vmin)*0.1||1; vmin-=pad; vmax+=pad; const tr=tmax-tmin||1,vr=vmax-vmin||1;
@@ -225,6 +249,320 @@ function renderCal(){
   $('cal').innerHTML=dows+cells;
   $('calmeta').textContent=now.toLocaleString('en-US',{month:'short',year:'numeric',timeZone:'UTC'})+' · UTC';
 }
+
+// ---- Galton win/loss lattice (peg bias solved so live green% converges to the REAL winRate) ----
+function galtonBoard(canvasEl, opts){
+  opts = opts || {};
+  var winRate    = Math.max(0.01, Math.min(0.99, opts.winRate != null ? opts.winRate : 0.5));
+  var trades     = opts.trades || 0;
+  var label      = opts.label || '';
+  var greenColor = opts.greenColor || '#3fb950';
+  var redColor   = opts.redColor   || '#f85149';
+  var bg         = opts.bg         || '#0a0e13';
+  var textColor  = opts.textColor  || '#e6edf3';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  var ctx = canvasEl.getContext('2d');
+  var W = 0, H = 0;
+  var seedStr = label + '|' + trades, seed = 0x9E3779B9;
+  for (var si = 0; si < seedStr.length; si++) seed = (Math.imul(seed ^ seedStr.charCodeAt(si), 0x85EBCA6B) | 0);
+  function rng(){
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  var ROWS = 8, BINS = ROWS + 1;
+  var DIVIDER = Math.max(1, Math.min(ROWS, Math.round((1 - winRate) * BINS)));
+  function survival(n, d, q){
+    var c = 1, sum = 0;
+    for (var k = 0; k <= n; k++){
+      var term = c * Math.pow(q, k) * Math.pow(1 - q, n - k);
+      if (k >= d) sum += term;
+      c = c * (n - k) / (k + 1);
+    }
+    return sum;
+  }
+  function solveBias(n, d, target){
+    var lo = 0, hi = 1, mid;
+    for (var i = 0; i < 40; i++){
+      mid = (lo + hi) / 2;
+      if (survival(n, d, mid) < target) lo = mid; else hi = mid;
+    }
+    return mid;
+  }
+  var GATE_BIAS = solveBias(ROWS, DIVIDER, winRate);
+  var padX, topBand, pegTop, pegBottom, binTop, binBottom;
+  var pegGapX, pegGapY, ballR, pegR;
+  var pegs = [], binX = [], binW = 0, dividerX = 0;
+  var counts = new Array(BINS);
+  var maxCount = 1, totalLanded = 0, greenLanded = 0, greenPct = winRate * 100;
+  var balls = [];
+  var MAX_BALLS = 22, spawnAcc = 0, SPAWN_EVERY = 0.16;
+  function resetCounts(){
+    for (var i = 0; i < BINS; i++) counts[i] = 0;
+    maxCount = 1; totalLanded = 0; greenLanded = 0;
+  }
+  resetCounts();
+  function build(){
+    padX = Math.max(14, W * 0.045);
+    var innerW = W - padX * 2;
+    topBand = 26;
+    var bottomBand = 20;
+    pegTop = topBand + Math.max(14, H * 0.06);
+    var fieldH = H - topBand - bottomBand;
+    pegBottom = pegTop + fieldH * 0.52;
+    binTop = pegBottom + Math.max(8, fieldH * 0.05);
+    binBottom = H - bottomBand;
+    binW = innerW / BINS;
+    pegGapX = binW;
+    pegGapY = (pegBottom - pegTop) / (ROWS - 1);
+    ballR = Math.max(2.1, Math.min(3.4, binW * 0.14));
+    pegR  = Math.max(1.1, Math.min(1.9, binW * 0.07));
+    var cx = W / 2;
+    pegs.length = 0;
+    for (var r = 0; r < ROWS; r++){
+      var y = pegTop + r * pegGapY, cnt = r + 1;
+      var x0 = cx - (cnt - 1) * pegGapX * 0.5;
+      for (var cI = 0; cI < cnt; cI++) pegs.push({ x: x0 + cI * pegGapX, y: y });
+    }
+    binX.length = 0;
+    var bx0 = cx - (BINS - 1) * binW * 0.5;
+    for (var b = 0; b < BINS; b++) binX.push(bx0 + b * binW);
+    dividerX = (binX[DIVIDER - 1] + binX[DIVIDER]) / 2;
+  }
+  function xAtRow(dirs, row){
+    var cx = W / 2, rights = 0;
+    for (var i = 0; i < row; i++) rights += dirs[i];
+    return cx + (rights * 2 - row) * pegGapX * 0.5;
+  }
+  function spawnBall(){
+    var rights = 0, dirs = new Array(ROWS);
+    for (var i = 0; i < ROWS; i++){
+      var goRight = rng() < GATE_BIAS;
+      dirs[i] = goRight ? 1 : 0;
+      if (goRight) rights++;
+    }
+    var bin = rights;
+    var xs = [W / 2], ys = [pegTop - pegGapY * 0.72];
+    for (var r2 = 0; r2 < ROWS; r2++){ xs.push(xAtRow(dirs, r2)); ys.push(pegTop + r2 * pegGapY); }
+    xs.push(binX[bin]); ys.push(pegBottom + pegGapY * 0.35);
+    balls.push({
+      bin: bin, xs: xs, ys: ys, seg: 0, p: 0, x: xs[0], y: ys[0],
+      speed: 2.0 + rng() * 0.6, phase: 'fall', settle: 0, trail: []
+    });
+  }
+  function barRestY(b){
+    var h = (counts[b] / maxCount) * (binBottom - binTop);
+    return binBottom - h - ballR;
+  }
+  function landBall(ball){
+    ball.phase = 'landed';
+    var b = ball.bin;
+    counts[b]++; totalLanded++;
+    if (b >= DIVIDER) greenLanded++;
+    if (counts[b] > maxCount) maxCount = counts[b];
+    ball.settle = 1;
+    ball.y = barRestY(b);
+  }
+  function updateBall(ball, dt){
+    if (ball.phase === 'landed'){ ball.settle = Math.max(0, ball.settle - dt * 3.2); return; }
+    if (ball.phase === 'drop'){
+      ball.p += dt * (ball.speed * 0.85);
+      var q = Math.min(1, ball.p);
+      ball.x = ball.dropX;
+      ball.y = ball.dropY0 + (ball.dropY1 - ball.dropY0) * (q * q);
+      pushTrail(ball);
+      if (q >= 1) landBall(ball);
+      return;
+    }
+    ball.p += dt * ball.speed;
+    while (ball.p >= 1){
+      ball.p -= 1; ball.seg++;
+      if (ball.seg >= ball.xs.length - 1){
+        ball.phase = 'drop'; ball.p = 0;
+        ball.dropX = binX[ball.bin];
+        ball.dropY0 = ball.ys[ball.ys.length - 1];
+        ball.dropY1 = barRestY(ball.bin);
+        ball.x = ball.dropX; ball.y = ball.dropY0;
+        return;
+      }
+    }
+    var i0 = ball.seg, i1 = ball.seg + 1;
+    var x0 = ball.xs[i0], x1 = ball.xs[i1], y0 = ball.ys[i0], y1 = ball.ys[i1];
+    var e = ball.p, ease = e * e * (3 - 2 * e);
+    ball.x = x0 + (x1 - x0) * ease;
+    var vy = e * e, hop = Math.sin(e * Math.PI) * pegGapY * 0.09;
+    ball.y = y0 + (y1 - y0) * vy - hop;
+    pushTrail(ball);
+  }
+  function pushTrail(ball){
+    ball.trail.push(ball.x, ball.y);
+    if (ball.trail.length > 12) ball.trail.splice(0, ball.trail.length - 12);
+  }
+  function roundRectTop(x, y, w, h, r){
+    r = Math.min(r, w / 2, h);
+    ctx.beginPath();
+    ctx.moveTo(x, y + h); ctx.lineTo(x, y + r); ctx.arcTo(x, y, x + r, y, r);
+    ctx.lineTo(x + w - r, y); ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h); ctx.closePath();
+  }
+  function hexA(hex, a){
+    var m = /^#([0-9a-f]{6})$/i.exec(hex);
+    if (!m) return hex;
+    var n = parseInt(m[1], 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+  function drawPegs(){
+    ctx.fillStyle = textColor;
+    for (var i = 0; i < pegs.length; i++){
+      var pg = pegs[i];
+      ctx.globalAlpha = 0.05; ctx.beginPath(); ctx.arc(pg.x, pg.y, pegR * 2.1, 0, 6.2832); ctx.fill();
+      ctx.globalAlpha = 0.22; ctx.beginPath(); ctx.arc(pg.x, pg.y, pegR, 0, 6.2832); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  function drawBins(){
+    var barW = binW * 0.82, fieldH = binBottom - binTop;
+    for (var b = 0; b < BINS; b++){
+      var h = (counts[b] / maxCount) * fieldH;
+      var x = binX[b] - barW / 2, y = binBottom - h;
+      var isGreen = b >= DIVIDER;
+      var c = isGreen ? greenColor : redColor;
+      ctx.globalAlpha = isGreen ? 0.10 : 0.07;
+      ctx.fillStyle = c;
+      ctx.fillRect(x, binBottom - Math.max(2, h * 0.06) - 1, barW, Math.max(2, h * 0.06));
+      ctx.globalAlpha = 1;
+      if (h < 0.6) continue;
+      var grd = ctx.createLinearGradient(0, y, 0, binBottom);
+      grd.addColorStop(0, c); grd.addColorStop(1, hexA(c, 0.28));
+      ctx.fillStyle = grd;
+      roundRectTop(x, y, barW, h, Math.min(3, barW * 0.18));
+      ctx.fill();
+      ctx.strokeStyle = c; ctx.globalAlpha = 0.9; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(x + 0.5, y + 0.7); ctx.lineTo(x + barW - 0.5, y + 0.7); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+  function drawDivider(){
+    ctx.save();
+    ctx.strokeStyle = textColor; ctx.globalAlpha = 0.35; ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath(); ctx.moveTo(dividerX, pegTop - 4); ctx.lineTo(dividerX, binBottom); ctx.stroke();
+    ctx.restore();
+  }
+  function drawBalls(){
+    for (var i = 0; i < balls.length; i++){
+      var ball = balls[i];
+      var col = ball.bin >= DIVIDER ? greenColor : redColor;
+      if (ball.trail.length >= 4 && ball.phase !== 'landed'){
+        ctx.strokeStyle = col; ctx.lineCap = 'round';
+        for (var s = 0; s < ball.trail.length - 2; s += 2){
+          ctx.globalAlpha = (s / (ball.trail.length - 2)) * 0.26;
+          ctx.lineWidth = ballR * 1.05;
+          ctx.beginPath();
+          ctx.moveTo(ball.trail[s], ball.trail[s + 1]);
+          ctx.lineTo(ball.trail[s + 2], ball.trail[s + 3]);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+      var yOff = 0;
+      if (ball.phase === 'landed' && ball.settle > 0) yOff = -Math.sin(ball.settle * Math.PI) * ballR * 0.9;
+      ctx.globalAlpha = 0.28; ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(ball.x, ball.y + yOff, ballR * 2.1, 0, 6.2832); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.arc(ball.x, ball.y + yOff, ballR, 0, 6.2832); ctx.fillStyle = col; ctx.fill();
+    }
+  }
+  function drawLabels(){
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = '11px ' + MONO;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = textColor; ctx.globalAlpha = 0.6;
+    var left = (label ? label.toUpperCase() + ' · ' : '') +
+               (trades ? trades.toLocaleString() + ' TRADES · ' : '') +
+               'WIN ' + (winRate * 100).toFixed(1) + '%';
+    ctx.fillText(left, padX, 16);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = greenColor;
+    ctx.fillText('→ ' + greenPct.toFixed(1) + '% LIVE', W - padX, 16);
+    var tagY = H - 6;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = redColor; ctx.globalAlpha = 0.85;
+    ctx.fillText('LOSS', (binX[0] + binX[DIVIDER - 1]) / 2, tagY);
+    ctx.fillStyle = greenColor;
+    ctx.fillText('WIN', (binX[DIVIDER] + binX[BINS - 1]) / 2, tagY);
+    ctx.globalAlpha = 1;
+  }
+  function drawBaseline(){
+    ctx.strokeStyle = textColor; ctx.globalAlpha = 0.15; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padX * 0.6, binBottom + 0.5); ctx.lineTo(W - padX * 0.6, binBottom + 0.5); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  function checkResize(){
+    var w = canvasEl.width, h = canvasEl.height;
+    if (w !== W || h !== H){
+      W = w; H = h;
+      balls.length = 0;
+      resetCounts();
+      if (W > 1 && H > 1) build();
+    }
+  }
+  var raf = null, last = null;
+  function frame(now){
+    checkResize();
+    var dt = last == null ? 0.016 : Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (W < 2 || H < 2){ raf = requestAnimationFrame(frame); return; }
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+    spawnAcc += dt;
+    while (spawnAcc >= SPAWN_EVERY && balls.length < MAX_BALLS){ spawnAcc -= SPAWN_EVERY; spawnBall(); }
+    for (var i = balls.length - 1; i >= 0; i--){
+      updateBall(balls[i], dt);
+      if (balls[i].phase === 'landed' && balls[i].settle <= 0) balls.splice(i, 1);
+    }
+    if (totalLanded > 0){
+      greenPct += ((greenLanded / totalLanded) * 100 - greenPct) * Math.min(1, dt * 1.5);
+    }
+    drawBaseline(); drawBins(); drawPegs(); drawDivider(); drawBalls(); drawLabels();
+    raf = requestAnimationFrame(frame);
+  }
+  checkResize();
+  raf = requestAnimationFrame(frame);
+  return { stop: function(){ if (raf != null) cancelAnimationFrame(raf); raf = null; } };
+}
+// ---- lattice control: strategy select + (re)start on change ----
+var _galton=null, _latStrat='__port__', _latVenues=[];
+function _latPick(){
+  var vs=_latVenues;
+  if(_latStrat==='__port__'){
+    var t=0,w=0; vs.forEach(function(v){t+=v.trades;w+=v.wins;});
+    return {winRate:t?w/t:0.5, trades:t, label:'portfolio'};
+  }
+  var v=vs.find(function(x){return x.venue===_latStrat;})||vs[0]||{winRate:0.5,trades:0,venue:''};
+  return {winRate:v.winRate, trades:v.trades, label:v.venue};
+}
+function _latStart(){
+  var cv=$('lattice'); if(!cv) return;
+  cv.width=cv.clientWidth||440; cv.height=cv.clientHeight||300;
+  if(_galton) _galton.stop();
+  var p=_latPick();
+  _galton=galtonBoard(cv,{winRate:p.winRate,trades:p.trades,label:p.label,greenColor:'#3fb950',redColor:'#f85149',bg:'#0a0e13',textColor:'#e6edf3'});
+}
+function initLattice(vs){
+  _latVenues=vs||[];
+  var sel=$('latStrat');
+  if(sel && !sel.dataset.filled){
+    var opts=['<option value="__port__">portfolio (all)</option>'];
+    _latVenues.filter(function(v){return v.trades>0;}).forEach(function(v){opts.push('<option value="'+v.venue+'">'+v.venue+'</option>');});
+    sel.innerHTML=opts.join(''); sel.dataset.filled='1';
+    sel.onchange=function(){_latStrat=sel.value; _latStart();};
+  }
+  if(!_galton) _latStart();
+}
+window.addEventListener('resize',function(){var cv=$('lattice');if(cv&&_galton){cv.width=cv.clientWidth;cv.height=cv.clientHeight;}});
 
 let lastTs=0;
 async function poll(){
