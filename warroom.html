@@ -52,7 +52,7 @@ main.stale .panel{opacity:.55;transition:opacity .3s}
 .eqP{grid-column:1/8}.calP{grid-column:8/13}
 .chartP{grid-column:1/8}.latticeP{grid-column:8/13}
 .ridgeP{grid-column:1/13}
-#ridge{width:100%;height:340px;display:block;background:var(--bg);border-radius:6px}
+#ridge{width:100%;height:380px;display:block;background:var(--bg);border-radius:6px}
 .tvwrap{height:300px;border-radius:6px;overflow:hidden;background:var(--bg)}
 #lattice{width:100%;height:300px;display:block;border-radius:6px;background:var(--bg)}
 #latStrat{background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:5px;font:11px ui-monospace,monospace;padding:2px 6px;cursor:pointer}
@@ -584,9 +584,9 @@ function tailRidge(canvasEl, opts) {
   var negColor  = opts.negColor  || '#f85149';
   var ctx = canvasEl.getContext('2d');
   var W = 0, H = 0, pcx = 0, pcy = 0, pscale = 1;
-  var YAW = -0.58, PITCH = 0.62, DIST = 3.15, FOV = 2.15;
-  var DEPTH_SPREAD = 2.15;
-  var Y_SCALE = 0.85;
+  var YAW = -0.5, PITCH = 0.58, DIST = 3.7, FOV = 1.95;
+  var DEPTH_SPREAD = 1.45;
+  var Y_SCALE = 0.6;
   function parseHex(str) {
     if (!str || str[0] !== '#') return [255, 255, 255];
     var h = str.slice(1);
@@ -610,8 +610,8 @@ function tailRidge(canvasEl, opts) {
   }
   function setViewport() {
     pcx = W * 0.5;
-    pcy = H * 0.56;
-    pscale = Math.min(W * 0.62, H * 1.15);
+    pcy = H * 0.54;
+    pscale = Math.min(W * 0.42, H * 0.62);
   }
   var current = null, target = null;
   var LERP = 0.16;
@@ -746,7 +746,7 @@ var _ridge=null;
 function pushRidge(imb){
   if(!imb||!imb.length) return;
   ridgeHist.push(imb.slice());
-  if(ridgeHist.length>24) ridgeHist.shift();
+  if(ridgeHist.length>16) ridgeHist.shift();
   localStorage.setItem(LS_RIDGE,JSON.stringify(ridgeHist));
 }
 function ridgeGrid(){ return ridgeHist.slice().reverse(); }
